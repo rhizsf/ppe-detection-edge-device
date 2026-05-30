@@ -1,0 +1,47 @@
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Configuration & Secrets
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
+
+# Local Datasets & Weights
+assets/dataset_cropped/
+*.pt
+*.engine
+*.onnx
+
+assets/dataset/
+*.pt
+*.engine
+*.onnx
+
+assets/audio/
+*.wav
+
+# Training Runs & Logs
+runs/
+*.log
+training.log
+inference.log
+.system_generated/
+
+# Python Cache & Compiled Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# IDE Settings & System Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
