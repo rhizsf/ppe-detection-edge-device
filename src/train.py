@@ -62,17 +62,19 @@ CONFIG = {
     "momentum"       : 0.937,
     "weight_decay"   : 0.0005,
     "warmup_epochs"  : 3,
-    "project_name"   : "protmind_apdv2",        # nama subfolder
+    "project_name"   : "protmind_fixlabelingv1",        # nama subfolder
 
     # Augmentasi — aktif untuk dataset konstruksi (kondisi cahaya bervariasi)
     "augment"        : True,
     "hsv_h"          : 0.015,
     "hsv_s"          : 0.7,
     "hsv_v"          : 0.4,
-    "flipud"         : 0.1,
+    "flipud"         : 0.0,                     # ← FIXED: 0.0 untuk cropped person (pekerja tidak berdiri terbalik)
     "fliplr"         : 0.5,
-    "mosaic"         : 1.0,
-    "mixup"          : 0.1,
+    "mosaic"         : 0.0,                     # ← FIXED: 0.0 untuk cropped person (mosaik merusak anatomi)
+    "mixup"          : 0.0,                     # ← FIXED: 0.0 untuk cropped person (mixup merusak detail kecil)
+    "freeze"         : 10,                      # ← NEW: Bekukan 10 layer pertama backbone untuk transfer learning
+    "cls"            : 1.5,                     # ← NEW: Tingkatkan bobot klasifikasi (default YOLOv8 = 0.5) untuk mengatasi kelas minoritas
 
     # Device & DataLoader
     "device"         : "cuda" if torch.cuda.is_available() else "cpu",
@@ -147,8 +149,32 @@ def prepare_cropped_dataset() -> str:
     cropped_dir = Path("assets/dataset_cropped")
     cropped_yaml_path = Path(CONFIG["cropped_yaml"])
     
+    # Load original data.yaml
+    with open(orig_yaml_path, "r", encoding="utf-8") as f:
+        data_cfg = yaml.safe_load(f)
+        
     if cropped_yaml_path.exists():
         log.info(f"  [Preprocess] Dataset cropped sudah ada di: {cropped_yaml_path.resolve()}")
+        # Perbarui file YAML ke format path absolut baru jika diperlukan
+        try:
+            with open(cropped_yaml_path, "r", encoding="utf-8") as f:
+                existing = yaml.safe_load(f)
+            if not existing or "path" not in existing:
+                log.info("  [Preprocess] Memperbarui data_cropped.yaml ke format absolute path baru...")
+                cropped_yaml_content = {
+                    "path": str(cropped_dir.resolve()),
+                    "train": "train/images",
+                    "val": "val/images",
+                    "test": "test/images",
+                    "nc": len(data_cfg["names"]),
+                    "names": data_cfg["names"]
+                }
+                with open(cropped_yaml_path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(cropped_yaml_content, f, default_flow_style=False)
+                log.info("  [Preprocess] Pembaruan data_cropped.yaml selesai.")
+        except Exception as e:
+            log.warning(f"  Gagal memvalidasi/memperbarui data_cropped.yaml: {e}")
+            
         log.info("  Melewati proses cropping. Jika ingin regenerasi, silakan hapus folder 'assets/dataset_cropped'.")
         return str(cropped_yaml_path)
         
@@ -156,10 +182,6 @@ def prepare_cropped_dataset() -> str:
     log.info("  [Preprocess] MENYIAPKAN DATASET DENGAN CROPPING PERSON (STAGE 1)")
     log.info("=" * 60)
     
-    # Load original data.yaml
-    with open(orig_yaml_path, "r", encoding="utf-8") as f:
-        data_cfg = yaml.safe_load(f)
-        
     orig_base_dir = orig_yaml_path.parent
     
     # Inisialisasi model person detector (Stage 1)
@@ -239,17 +261,30 @@ def prepare_cropped_dataset() -> str:
             for idx, box in enumerate(boxes):
                 x1, y1, x2, y2 = map(int, box[:4])
                 
-                # Pastikan koordinat dalam batas gambar
+                # Pastikan koordinat dasar dalam batas gambar
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(W, x2), min(H, y2)
                 
-                crop_w = x2 - x1
-                crop_h = y2 - y1
+                box_w = x2 - x1
+                box_h = y2 - y1
+                
+                # Tambahkan padding 10% di setiap sisi (total 20% lebar dan tinggi)
+                # Padding mencegah bagian kepala (helmet) dan kaki (safety shoes) terpotong di tepi gambar crop
+                pad_w = int(box_w * 0.10)
+                pad_h = int(box_h * 0.10)
+                
+                x1_pad = max(0, x1 - pad_w)
+                y1_pad = max(0, y1 - pad_h)
+                x2_pad = min(W, x2 + pad_w)
+                y2_pad = min(H, y2 + pad_h)
+                
+                crop_w = x2_pad - x1_pad
+                crop_h = y2_pad - y1_pad
                 if crop_w < 15 or crop_h < 15:
                     continue
                     
-                # Crop gambar
-                crop_img = img[y1:y2, x1:x2]
+                # Crop gambar berdasarkan koordinat yang ber-padding
+                crop_img = img[y1_pad:y2_pad, x1_pad:x2_pad]
                 
                 # Relokalisasi label PPE ke dalam crop person
                 crop_labels = []
@@ -260,13 +295,14 @@ def prepare_cropped_dataset() -> str:
                     pw = w * W
                     ph = h * H
                     
-                    # Cek apakah center PPE berada di dalam bounding box person
+                    # Cek apakah center PPE berada di dalam bounding box person ASLI (sebelum padding)
+                    # Ini mencegah mengambil PPE milik orang lain yang terdeteksi di area padding
                     if x1 <= px_center <= x2 and y1 <= py_center <= y2:
-                        # Top-left and bottom-right relative to crop
-                        px1_new = max(px_center - pw/2, x1) - x1
-                        py1_new = max(py_center - ph/2, y1) - y1
-                        px2_new = min(px_center + pw/2, x2) - x1
-                        py2_new = min(py_center + ph/2, y2) - y1
+                        # Hitung koordinat relatif terhadap crop ber-padding
+                        px1_new = max(px_center - pw/2, x1_pad) - x1_pad
+                        py1_new = max(py_center - ph/2, y1_pad) - y1_pad
+                        px2_new = min(px_center + pw/2, x2_pad) - x1_pad
+                        py2_new = min(py_center + ph/2, y2_pad) - y1_pad
                         
                         # New center and dimensions in crop coordinates
                         cx_new = (px1_new + px2_new) / 2
@@ -274,7 +310,7 @@ def prepare_cropped_dataset() -> str:
                         w_new = px2_new - px1_new
                         h_new = py2_new - py1_new
                         
-                        # Normalisasi terhadap ukuran crop
+                        # Normalisasi terhadap ukuran crop ber-padding
                         cx_norm = cx_new / crop_w
                         cy_norm = cy_new / crop_h
                         w_norm = w_new / crop_w
@@ -282,28 +318,42 @@ def prepare_cropped_dataset() -> str:
                         
                         crop_labels.append((cls_id, cx_norm, cy_norm, w_norm, h_norm))
                         
-                # Simpan crop gambar person
-                crop_img_name = f"{img_path.stem}_person_{idx}.jpg"
-                crop_label_name = f"{img_path.stem}_person_{idx}.txt"
-                
-                crop_img_out = cropped_dir / split_name / "images" / crop_img_name
-                crop_lbl_out = cropped_dir / split_name / "labels" / crop_label_name
-                
-                cv2.imwrite(str(crop_img_out), crop_img)
-                
-                with open(crop_lbl_out, "w", encoding="utf-8") as out_f:
+                # Oversampling dinamis untuk menyeimbangkan kelas minoritas (hanya untuk data train agar tidak data leakage)
+                oversample_factor = 1
+                if split_name == "train":
                     for lbl in crop_labels:
-                        out_f.write(f"{lbl[0]} {lbl[1]:.6f} {lbl[2]:.6f} {lbl[3]:.6f} {lbl[4]:.6f}\n")
-                        
-                cropped_count += 1
+                        cls_id = lbl[0]
+                        if cls_id == 2:    # no-safety shoes (~9% dari total data) -> oversample 3x
+                            oversample_factor = max(oversample_factor, 3)
+                        elif cls_id == 1:  # no-helmet (~10% dari total data) -> oversample 3x
+                            oversample_factor = max(oversample_factor, 3)
+                        elif cls_id == 3:  # no-vest (~15% dari total data) -> oversample 2x
+                            oversample_factor = max(oversample_factor, 2)
+
+                for r in range(oversample_factor):
+                    suffix = f"_r{r}" if r > 0 else ""
+                    crop_img_name = f"{img_path.stem}_person_{idx}{suffix}.jpg"
+                    crop_label_name = f"{img_path.stem}_person_{idx}{suffix}.txt"
+                    
+                    crop_img_out = cropped_dir / split_name / "images" / crop_img_name
+                    crop_lbl_out = cropped_dir / split_name / "labels" / crop_label_name
+                    
+                    cv2.imwrite(str(crop_img_out), crop_img)
+                    
+                    with open(crop_lbl_out, "w", encoding="utf-8") as out_f:
+                        for lbl in crop_labels:
+                            out_f.write(f"{lbl[0]} {lbl[1]:.6f} {lbl[2]:.6f} {lbl[3]:.6f} {lbl[4]:.6f}\n")
+                            
+                    cropped_count += 1
                 
         log.info(f"  ✓ Split '{split_name}': berhasil membuat {cropped_count} potong gambar person.")
         
-    # Buat data_cropped.yaml
+    # Buat data_cropped.yaml dengan path absolut agar YOLOv8 tidak salah mencari direktori
     cropped_yaml_content = {
-        "train": "../train/images",
-        "val": "../val/images",
-        "test": "../test/images",
+        "path": str(cropped_dir.resolve()),
+        "train": "train/images",
+        "val": "val/images",
+        "test": "test/images",
         "nc": len(data_cfg["names"]),
         "names": data_cfg["names"]
     }
@@ -319,10 +369,13 @@ def prepare_cropped_dataset() -> str:
 
 def find_latest_run(project_name: str) -> Path | None:
     """
-    Temukan direktori run YOLO terbaru.
-    YOLO menyimpan hasil di: {runs_dir}/detect/{project_name}/
+    Temukan direktori run YOLO terbaru secara robust.
+    Mendukung path absolute dan pencarian recursive (rglob) jika struktur folder terduplikasi.
     """
-    base_detect = Path(CONFIG["runs_dir"]) / "detect"
+    base_dir = Path(CONFIG["runs_dir"]).resolve()
+    
+    # 1. Cari di {runs_dir}/detect/
+    base_detect = base_dir / "detect"
     if base_detect.exists():
         candidates = sorted(
             base_detect.glob(f"{project_name}*"),
@@ -330,8 +383,20 @@ def find_latest_run(project_name: str) -> Path | None:
         )
         if candidates:
             return candidates[-1]
-    base = Path(CONFIG["runs_dir"])
-    candidates = sorted(base.glob(f"{project_name}*"), key=lambda p: p.stat().st_mtime)
+            
+    # 2. Cari langsung di {runs_dir}/
+    candidates = sorted(
+        base_dir.glob(f"{project_name}*"),
+        key=lambda p: p.stat().st_mtime
+    )
+    if candidates:
+        return candidates[-1]
+        
+    # 3. Fallback: Cari secara rekursif di seluruh {runs_dir} (mengatasi runs/detect/runs dll.)
+    candidates = sorted(
+        base_dir.rglob(f"**/{project_name}*"),
+        key=lambda p: p.stat().st_mtime
+    )
     return candidates[-1] if candidates else None
 
 
@@ -513,7 +578,7 @@ def generate_summary_dashboard(data: dict, graphs_dir: Path, epochs: list[int]) 
     fig = plt.figure(figsize=(18, 12))
     fig.patch.set_facecolor("#FAFAFA")
     fig.suptitle(
-        "PROTMIND — Model Training Dashboard\nYOLOv8n | Dataset APD 7 Kelas",
+        "PROTMIND — Model Training Dashboard\nYOLOv8n | Dataset APD 6 Kelas",
         fontsize=15, fontweight="bold", y=0.98
     )
     gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.50, wspace=0.38)
@@ -570,7 +635,7 @@ def generate_summary_dashboard(data: dict, graphs_dir: Path, epochs: list[int]) 
         table.scale(2.0, 2.5)
         ax_table.set_title("Metrik Akhir Pelatihan (Epoch Terakhir)", fontsize=11, fontweight="bold", pad=10)
 
-    out = graphs_dir / "04_dashboard.png"
+    out = graphs_dir / "dashboard.png"
     fig.savefig(out, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     log.info(f"  [Grafik] Dashboard → {out}")
@@ -627,14 +692,17 @@ def generate_all_graphs(run_dir: Path) -> None:
 # TRAINING UTAMA
 # ─────────────────────────────────────────────────────────────────────────────
 def run_training() -> Path:
-    """Eksekusi pelatihan YOLOv8n dan kembalikan path direktori run."""
+    """Eksekusi pelatihan YOLOv8n dan kembalikan path direktori run hasil training."""
     log.info("  Memuat pretrained weights YOLOv8n...")
     model = YOLO(CONFIG["model_weights"])
 
     log.info("  Memulai pelatihan...")
     start_time = time.time()
 
-    results = model.train(
+    # Gunakan absolute path untuk project agar YOLOv8 tidak menduplikasi folder secara kacau
+    project_abs_path = str(Path(CONFIG["runs_dir"]).resolve())
+
+    model.train(
         data          = CONFIG["data_yaml"],
         epochs        = CONFIG["epochs"],
         imgsz         = CONFIG["imgsz"],
@@ -657,7 +725,9 @@ def run_training() -> Path:
         workers       = CONFIG["workers"],          # 0 di Windows → pin_memory otomatis nonaktif
         amp           = CONFIG["amp"],
         seed          = CONFIG["seed"],
-        project       = CONFIG["runs_dir"],
+        freeze        = CONFIG["freeze"],           # Bekukan layer backbone awal untuk transfer learning lebih stabil
+        cls           = CONFIG["cls"],              # Tingkatkan bobot klasifikasi untuk menyeimbangkan kelas minoritas
+        project       = project_abs_path,
         name          = CONFIG["project_name"],
         exist_ok      = False,
         verbose       = True,
@@ -671,7 +741,20 @@ def run_training() -> Path:
     hours, rem = divmod(int(elapsed), 3600)
     mins, secs  = divmod(rem, 60)
     log.info(f"  Training selesai dalam: {hours}j {mins}m {secs}d")
-    return results
+
+    # Ambil save_dir langsung dari trainer (keandalan 100%)
+    if hasattr(model, "trainer") and model.trainer is not None and hasattr(model.trainer, "save_dir"):
+        run_dir = Path(model.trainer.save_dir)
+        log.info(f"  [Trainer] Direktori run dideteksi dari trainer: {run_dir.resolve()}")
+        return run_dir
+
+    # Fallback jika trainer tidak memiliki save_dir
+    fallback_dir = find_latest_run(CONFIG["project_name"])
+    if fallback_dir:
+        log.info(f"  [Trainer] Direktori run dideteksi lewat pencarian fallback: {fallback_dir.resolve()}")
+        return fallback_dir
+
+    raise RuntimeError("Gagal menentukan direktori hasil pelatihan.")
 
 
 def copy_best_model(run_dir: Path) -> None:
@@ -715,15 +798,9 @@ def main():
         cropped_yaml = prepare_cropped_dataset()
         CONFIG["data_yaml"] = cropped_yaml
 
-    # 3. Jalankan training
-    run_training()
-
-    # 4. Temukan direktori run hasil training
-    run_dir = find_latest_run(CONFIG["project_name"])
-    if run_dir is None:
-        log.error("  Direktori run tidak ditemukan setelah training.")
-        sys.exit(1)
-    log.info(f"  Direktori run: {run_dir.resolve()}")
+    # 3. Jalankan training dan dapatkan direktori hasil secara langsung
+    run_dir = run_training()
+    log.info(f"  Direktori run aktif: {run_dir.resolve()}")
 
     # 5. Salin best.pt ke models/
     copy_best_model(run_dir)
