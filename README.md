@@ -56,6 +56,12 @@ When a new violation passes the cooldown check, a warning is sent to the Telegra
   - 🔵 **Blue Box**: Overall worker (`person`) bounding box.
   - 🟢 **Green Box**: Compliant safety gear (`helmet`, `vest`, `safety shoes`).
   - 🔴 **Red Box**: Active violations (`no-helmet`, `no-vest`, `no-safety shoes`).
+  
+### ⚖️ Programmatic Class Balancing & Transfer Learning
+To overcome severe class imbalance common in safety datasets (where compliant workers far outnumber violations), the training pipeline automatically applies deep learning optimization techniques:
+- **Dynamic Crop Oversampling**: During the cropping stage, the script dynamically duplicates training images containing violations (`no-helmet` by 3x, `no-safety shoes` by 3x, and `no-vest` by 2x). This is strictly restricted to the `train` split to prevent validation/testing data leakage.
+- **Classification Loss Scale (`cls=1.5`)**: Elevates the classification loss weight factor (increased from YOLOv8 default `0.5` to `1.5`) to heavily penalize APD misclassifications.
+- **Backbone Layer Freezing (`freeze=10`)**: Freezes the first 10 layers of the pretrained YOLOv8n backbone to preserve visual features, accelerate convergence, and prevent overfitting.
 
 ### 💻 Cross-Platform Compatibility
 - **Windows (Laptop)**: Native async playback via built-in `winsound` / PowerShell fallbacks.
