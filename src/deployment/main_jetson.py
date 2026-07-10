@@ -23,6 +23,16 @@ import torch
 from ultralytics import YOLO
 from dotenv import load_dotenv
 
+# Impor pustaka native TensorRT & PyCUDA secara aman (defensive imports)
+try:
+    import tensorrt as trt
+    import pycuda.driver as cuda
+    import pycuda.autoinit
+    TRT_AVAILABLE = True
+except ImportError as e:
+    TRT_AVAILABLE = False
+    TRT_ERROR = str(e)
+
 # Muat variabel lingkungan
 load_dotenv()
 
@@ -38,17 +48,204 @@ try:
 except Exception:
     pass
 
-# Tentukan model secara dinamis berdasarkan versi Python
+# Helper classes untuk meniru struktur output Ultralytics YOLO API
+class Detection(object):
+    def __init__(self, class_name, confidence, x1, y1, x2, y2):
+        self.class_name = class_name
+        self.confidence = confidence
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
+
+class NumpyWrapper(object):
+    def __init__(self, val):
+        self.val = val
+    def cpu(self):
+        return self
+    def numpy(self):
+        return self.val
+
+class MockBoxPPE(object):
+    def __init__(self, c, cf, xywhn_val):
+        self.cls = NumpyWrapper(np.array([c]))
+        self.conf = NumpyWrapper(np.array([cf]))
+        self.xywhn = NumpyWrapper(np.array([xywhn_val]))
+
+class MockBoxesPerson(object):
+    def __init__(self, xyxy_arr):
+        self.xyxy = self
+        self.arr = xyxy_arr
+    def cpu(self):
+        return self
+    def numpy(self):
+        return self.arr
+
+class MockResult(object):
+    def __init__(self, boxes):
+        self.boxes = boxes
+
+class YoloTRT(object):
+    def __init__(self, engine_path, names):
+        self.names = names
+        self.logger = trt.Logger(trt.Logger.WARNING)
+        with open(engine_path, "rb") as f, trt.Runtime(self.logger) as runtime:
+            self.engine = runtime.deserialize_cuda_engine(f.read())
+        self.context = self.engine.create_execution_context()
+
+        self.inputs = []
+        self.outputs = []
+        self.bindings = []
+        self.stream = cuda.Stream()
+
+        for binding in self.engine:
+            size = trt.volume(self.engine.get_binding_shape(binding)) * self.engine.max_batch_size
+            dtype = trt.nptype(self.engine.get_binding_dtype(binding))
+            
+            host_mem = cuda.pagelocked_empty(size, dtype)
+            device_mem = cuda.mem_alloc(host_mem.nbytes)
+            self.bindings.append(int(device_mem))
+            
+            if self.engine.binding_is_input(binding):
+                self.inputs.append({'host': host_mem, 'device': device_mem, 'shape': self.engine.get_binding_shape(binding)})
+            else:
+                self.outputs.append({'host': host_mem, 'device': device_mem, 'shape': self.engine.get_binding_shape(binding)})
+
+    def predict(self, frame, imgsz, conf_thres, iou_thres):
+        img, r, dw, dh = self._preprocess(frame, (imgsz, imgsz))
+        
+        np.copyto(self.inputs[0]['host'], img.ravel())
+        cuda.memcpy_htod_async(self.inputs[0]['device'], self.inputs[0]['host'], self.stream)
+        self.context.execute_async_v2(bindings=self.bindings, stream_handle=self.stream.handle)
+        cuda.memcpy_dtoh_async(self.outputs[0]['host'], self.outputs[0]['device'], self.stream)
+        self.stream.synchronize()
+        
+        out_shape = self.outputs[0]['shape']
+        output = self.outputs[0]['host'].reshape(out_shape)
+        
+        return self._postprocess(output, r, dw, dh, conf_thres, iou_thres)
+
+    def _preprocess(self, img, input_size):
+        shape = img.shape[:2]
+        r = min(input_size[0] / shape[0], input_size[1] / shape[1])
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+        dw, dh = input_size[0] - new_unpad[0], input_size[1] - new_unpad[1]
+        dw /= 2
+        dh /= 2
+
+        if shape[::-1] != new_unpad:
+            img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+
+        img = img[:, :, ::-1].transpose(2, 0, 1)
+        img = np.ascontiguousarray(img, dtype=np.float32)
+        img /= 255.0
+        return np.expand_dims(img, axis=0), r, left, top
+
+    def _postprocess(self, output, r, dw, dh, conf_threshold, iou_threshold):
+        output = output[0].T
+        boxes = output[:, :4]
+        scores = output[:, 4:]
+        
+        class_ids = np.argmax(scores, axis=1)
+        confidences = scores[np.arange(len(scores)), class_ids]
+        
+        mask = confidences > conf_threshold
+        boxes = boxes[mask]
+        confidences = confidences[mask]
+        class_ids = class_ids[mask]
+        
+        if len(boxes) == 0:
+            return []
+            
+        x1 = boxes[:, 0] - boxes[:, 2] / 2
+        y1 = boxes[:, 1] - boxes[:, 3] / 2
+        x2 = boxes[:, 0] + boxes[:, 2] / 2
+        y2 = boxes[:, 1] + boxes[:, 3] / 2
+        
+        x1 = (x1 - dw) / r
+        y1 = (y1 - dh) / r
+        x2 = (x2 - dw) / r
+        y2 = (y2 - dh) / r
+        
+        boxes_xywh = np.stack([x1, y1, x2-x1, y2-y1], axis=1)
+        indices = cv2.dnn.NMSBoxes(boxes_xywh.tolist(), confidences.tolist(), conf_threshold, iou_threshold)
+        
+        results = []
+        if len(indices) > 0:
+            for i in indices.flatten():
+                results.append(Detection(
+                    class_name=self.names.get(int(class_ids[i]), "unknown"),
+                    confidence=float(confidences[i]),
+                    x1=int(x1[i]), y1=int(y1[i]), x2=int(x2[i]), y2=int(y2[i])
+                ))
+        return results
+
+class YoloTRTWrapper(object):
+    def __init__(self, engine_path, names, is_person=True):
+        self.trt_model = YoloTRT(engine_path, names)
+        self.is_person = is_person
+        self.names = names
+        self.names_reverse = {v: k for k, v in names.items()}
+
+    def __call__(self, frame, conf=0.25, iou=0.45, classes=None, verbose=False):
+        detections = self.trt_model.predict(frame, 640, conf, iou)
+        
+        if self.is_person:
+            xyxy_list = []
+            for det in detections:
+                if classes is not None and det.class_name != "person":
+                    continue
+                xyxy_list.append([det.x1, det.y1, det.x2, det.y2, det.confidence, 0])
+            if not xyxy_list:
+                xyxy_array = np.zeros((0, 6), dtype=np.float32)
+            else:
+                xyxy_array = np.array(xyxy_list, dtype=np.float32)
+            return [MockResult(MockBoxesPerson(xyxy_array))]
+        else:
+            boxes = []
+            h, w = frame.shape[:2]
+            for det in detections:
+                cls_id = self.names_reverse.get(det.class_name, 0)
+                box_w = det.x2 - det.x1
+                box_h = det.y2 - det.y1
+                cx = det.x1 + box_w / 2.0
+                cy = det.y1 + box_h / 2.0
+                
+                cx_n = cx / w if w > 0 else 0.0
+                cy_n = cy / h if h > 0 else 0.0
+                w_n = box_w / w if w > 0 else 0.0
+                h_n = box_h / h if h > 0 else 0.0
+                
+                boxes.append(MockBoxPPE(cls_id, det.confidence, [cx_n, cy_n, w_n, h_n]))
+            return [MockResult(boxes)]
+
+def load_yolo_model(model_path, names, is_person=True):
+    if model_path.endswith(".engine") and TRT_AVAILABLE:
+        log.info(f"  [Detector] Memuat native TensorRT engine: {model_path}")
+        return YoloTRTWrapper(model_path, names, is_person=is_person)
+    else:
+        log.info(f"  [Detector] Memuat standard YOLO model: {model_path}")
+        return YOLO(model_path)
+
+# Tentukan model secara dinamis (memprioritaskan TensorRT .engine jika CUDA/TRT aktif, lalu .pt)
 is_python_36 = sys.version_info < (3, 7)
-if is_python_36:
-    # Pada Python 3.6, model .pt baru tidak bisa dibaca karena perbedaan struktur modul (Pickle error).
-    # Prioritaskan format .onnx karena kompatibel secara universal tanpa pickle.
-    model_person_path = "models/best_person.onnx" if Path("models/best_person.onnx").exists() else "models/best_person.pt"
-    model_ppe_path = "models/best_ppe.onnx" if Path("models/best_ppe.onnx").exists() else "models/best_ppe.pt"
+use_trt_engine = TRT_AVAILABLE and torch.cuda.is_available()
+
+if use_trt_engine:
+    model_person_path = "models/best_person.engine" if Path("models/best_person.engine").exists() else ("models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt")
+    model_ppe_path = "models/best_ppe.engine" if Path("models/best_ppe.engine").exists() else ("models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260710_022641.pt")
 else:
-    # Pada Python 3.8+, prioritaskan .engine jika CUDA aktif, lalu .pt
-    model_person_path = "models/best_person.engine" if (Path("models/best_person.engine").exists() and torch.cuda.is_available()) else ("models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt")
-    model_ppe_path = "models/best_ppe.engine" if (Path("models/best_ppe.engine").exists() and torch.cuda.is_available()) else ("models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260710_022641.pt")
+    # Fallback jika tidak ada CUDA/TRT:
+    # Di Python 3.6, model .pt baru mengalami pickle error, jadi gunakan .onnx jika ada
+    if is_python_36:
+        model_person_path = "models/best_person.onnx" if Path("models/best_person.onnx").exists() else "models/best_person.pt"
+        model_ppe_path = "models/best_ppe.onnx" if Path("models/best_ppe.onnx").exists() else "models/best_ppe.pt"
+    else:
+        model_person_path = "models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt"
+        model_ppe_path = "models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260710_022641.pt"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -298,9 +495,16 @@ def main():
         log.error(f"  File model PPE kustom '{CONFIG['model_ppe']}' tidak ditemukan.")
         sys.exit(1)
 
-    # Inisialisasi model
-    model_p = YOLO(CONFIG["model_person"])
-    model_ppe = YOLO(CONFIG["model_ppe"])
+    # Inisialisasi model secara dinamis (mendukung YOLO biasa dan Native TRT Engine)
+    model_p = load_yolo_model(CONFIG["model_person"], {0: "person"}, is_person=True)
+    model_ppe = load_yolo_model(CONFIG["model_ppe"], {
+        0: "helmet",
+        1: "no-helmet",
+        2: "no-safety shoes",
+        3: "no-vest",
+        4: "safety shoes",
+        5: "vest"
+    }, is_person=False)
     
     # Class map untuk APD
     ppe_classes = {
