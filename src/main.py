@@ -661,22 +661,36 @@ def main():
             )
             
             if not CONFIG.get("headless", False):
-                cv2.imshow("PROTMIND APD Detection - Edge Device", annotated_frame)
-                
-                # Keluar jika menekan tombol 'Q'
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    log.info("  Keluar atas permintaan pengguna.")
-                    break
+                try:
+                    cv2.imshow("PROTMIND APD Detection - Edge Device", annotated_frame)
+                    
+                    # Keluar jika menekan tombol 'Q'
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        log.info("  Keluar atas permintaan pengguna.")
+                        break
+                except cv2.error as e:
+                    log.warning(
+                        "  [GUI Warning] Jendela tampilan tidak didukung oleh instalasi OpenCV Anda. "
+                        "Mengaktifkan mode headless otomatis."
+                    )
+                    CONFIG["headless"] = True
+                    time.sleep(0.001)
             else:
                 # Mode headless: berikan jeda pendek non-blocking agar CPU tidak pinned 100%
-                cv2.waitKey(1)
+                time.sleep(0.001)
     except KeyboardInterrupt:
         log.info("  Program dihentikan oleh pengguna (Ctrl+C).")
     finally:
         # Cleanup
         exit_event.set()
-        cap.release()
-        cv2.destroyAllWindows()
+        try:
+            cap.release()
+        except Exception:
+            pass
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
         
         # Hentikan worker thread
         try:
