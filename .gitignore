@@ -52,3 +52,5 @@ Thumbs.db
 
 # Global Unignores
 !*.onnx
+!models/best_person.pt
+!models/best_ppe_20260710_022641.pt
