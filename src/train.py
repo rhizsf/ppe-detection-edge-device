@@ -43,39 +43,50 @@ _PIN_MEMORY     = False if _IS_WINDOWS else True
 # ─────────────────────────────────────────────────────────────────────────────
 CONFIG = {
     # Path & Pipeline Mode
-    "two_stage"      : True,                    # True = Latih model pada cropped person (Stage 2)
-    "original_yaml"  : "assets/dataset/data.yaml", # Path dataset asli
-    "cropped_yaml"   : "assets/dataset_cropped/data_cropped.yaml", # Path dataset cropped hasil pemrosesan
-    "data_yaml"      : "assets/dataset_cropped/data_cropped.yaml", # Target training (akan diperbarui otomatis)
-    "model_weights"  : "yolov8n.pt",            # pretrained backbone dari Ultralytics
-    "output_model"   : "models/best_ppe.pt",    # tujuan salin model terbaik hasil training
-    "runs_dir"       : "runs",                  # ← FIXED: jangan pakai "runs/detect"
-    "graphs_dir"     : "models/training_graphs",# direktori simpan grafik analisis
+    "two_stage"      : True,
+    "train_person"   : True,
+    "force_recreate" : False,
+    "original_yaml"  : "assets/dataset/data.yaml",
+    "cropped_yaml"   : "assets/dataset_cropped/data_cropped.yaml",
+    "person_yaml"    : "assets/dataset_person/data_person.yaml",
+    "data_yaml"      : "assets/dataset_cropped/data_cropped.yaml",
+    "model_weights"  : "yolov8n.pt",
+    "output_model"   : "models/best_ppe.pt",
+    "output_person_model": "models/best_person.pt",
+    "runs_dir"       : "runs",
+    "graphs_dir"     : "models/training_graphs",
 
     # Hiperparameter Pelatihan
-    "epochs"         : 100,
+    "epochs"         : 150,
+    "epochs_person"  : 50,
     "imgsz"          : 640,
-    "batch"          : 16,                      # turunkan ke 8 jika VRAM tidak cukup
-    "patience"       : 20,                      # early stopping
-    "lr0"            : 0.01,                    # learning rate awal
-    "lrf"            : 0.001,                   # learning rate akhir (cosine decay)
+    "batch"          : 16,
+    "patience"       : 20,
+    "lr0"            : 0.01,
+    "lrf"            : 0.01,
     "momentum"       : 0.937,
     "weight_decay"   : 0.0005,
     "warmup_epochs"  : 3,
-    "project_name"   : "protmind_fixlabelingv1",        # nama subfolder
+    "project_name"   : "protmind_70-_20-_10-auto labeling",  
 
     # Augmentasi — aktif untuk dataset konstruksi (kondisi cahaya bervariasi)
     "augment"        : True,
     "hsv_h"          : 0.015,
     "hsv_s"          : 0.7,
     "hsv_v"          : 0.4,
-    "flipud"         : 0.0,                     # ← FIXED: 0.0 untuk cropped person (pekerja tidak berdiri terbalik)
+    "flipud"         : 0.0,
     "fliplr"         : 0.5,
-    "mosaic"         : 0.0,                     # ← FIXED: 0.0 untuk cropped person (mosaik merusak anatomi)
-    "mixup"          : 0.0,                     # ← FIXED: 0.0 untuk cropped person (mixup merusak detail kecil)
-    "freeze"         : 10,                      # ← NEW: Bekukan 10 layer pertama backbone untuk transfer learning
-    "cls"            : 1.5,                     # ← NEW: Tingkatkan bobot klasifikasi (default YOLOv8 = 0.5) untuk mengatasi kelas minoritas
-
+    "mosaic"         : 0.0,
+    "mixup"          : 0.0,
+    "freeze"         : 10,
+    "cls"            : 1.5,
+    "cos_lr"         : True,
+    "label_smoothing": 0.1,
+    "degrees"        : 10.0,
+    "translate"      : 0.1,
+    "scale"          : 0.5,
+    "shear"          : 2.0,
+    
     # Device & DataLoader
     "device"         : "cuda" if torch.cuda.is_available() else "cpu",
     "workers"        : _SAFE_WORKERS,           # ← FIXED: 0 di Windows, 8 di Linux
@@ -137,6 +148,392 @@ def verify_environment() -> None:
     log.info("=" * 60)
 
 
+def cluster_unassigned_ppe(orig_labels, person_boxes, W, H):
+    """
+    Mengelompokkan anotasi APD yang tidak ter-cover oleh deteksi model person,
+    lalu merekonstruksi kotak bounding box person secara heuristik untuk data training.
+    """
+    # 1. Konversi person_boxes ke koordinat normalisasi agar mudah dicocokkan
+    norm_person_boxes = []
+    for box in person_boxes:
+        x1, y1, x2, y2 = box[:4]
+        norm_person_boxes.append((x1/W, y1/H, x2/W, y2/H))
+        
+    # 2. Cari label APD asli yang tidak tercakup kotak person mana pun
+    unassigned_ppe = []
+    for label in orig_labels:
+        cls_id, cx, cy, w, h = label
+        assigned = False
+        for px1, py1, px2, py2 in norm_person_boxes:
+            if px1 <= cx <= px2 and py1 <= cy <= py2:
+                assigned = True
+                break
+        if not assigned:
+            unassigned_ppe.append(label)
+            
+    if not unassigned_ppe:
+        return []
+        
+    # 3. Kelompokkan APD tak ter-cover berdasarkan kedekatan sumbu X (threshold 0.15)
+    unassigned_ppe.sort(key=lambda x: x[1])
+    clusters = []
+    current_cluster = [unassigned_ppe[0]]
+    for label in unassigned_ppe[1:]:
+        if label[1] - current_cluster[-1][1] <= 0.15:
+            current_cluster.append(label)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [label]
+    clusters.append(current_cluster)
+    
+    # 4. Konstruksi kotak orang untuk setiap kelompok APD
+    fallback_person_boxes = []
+    for cluster in clusters:
+        min_x = min(cx - w/2 for _, cx, _, w, _ in cluster)
+        max_x = max(cx + w/2 for _, cx, _, w, _ in cluster)
+        min_y = min(cy - h/2 for _, _, cy, _, h in cluster)
+        max_y = max(cy + h/2 for _, _, cy, _, h in cluster)
+        
+        has_helmet = any(cls_id in [0, 1] for cls_id, _, _, _, _ in cluster)
+        has_shoes = any(cls_id in [2, 4] for cls_id, _, _, _, _ in cluster)
+        has_vest = any(cls_id in [3, 5] for cls_id, _, _, _, _ in cluster)
+        
+        # Perluas ke atas (untuk kepala/helm jika tidak terdeteksi)
+        if not has_helmet:
+            h_est = max_y - min_y
+            if has_vest:
+                min_y = max(0.0, min_y - 0.3 * h_est)
+            else:
+                min_y = max(0.0, min_y - 0.15 * h_est)
+        else:
+            min_y = max(0.0, min_y - 0.05)
+            
+        # Perluas ke bawah (untuk kaki/sepatu jika tidak terdeteksi)
+        if not has_shoes:
+            h_est = max_y - min_y
+            if has_vest:
+                max_y = min(1.0, max_y + 0.6 * h_est)
+            else:
+                max_y = min(1.0, max_y + 0.3 * h_est)
+        else:
+            max_y = min(1.0, max_y + 0.05)
+            
+        # Berikan padding horizontal
+        w_est = max_x - min_x
+        min_x = max(0.0, min_x - 0.1 * w_est - 0.05)
+        max_x = min(1.0, max_x + 0.1 * w_est + 0.05)
+        
+        # Konversi kembali ke pixel absolute
+        fallback_person_boxes.append([
+            int(min_x * W),
+            int(min_y * H),
+            int(max_x * W),
+            int(max_y * H)
+        ])
+        
+    return fallback_person_boxes
+
+
+def clean_dataset_caches(dataset_dir: Path) -> None:
+    """
+    Menghapus berkas labels.cache secara eksplisit di seluruh folder dataset
+    untuk mencegah masalah caching YOLOv8 jika data diubah.
+    """
+    if not dataset_dir.exists():
+        return
+    for cache_file in dataset_dir.rglob("*.cache"):
+        try:
+            log.info(f"  [Cache Clean] Menghapus file cache: {cache_file.name} dari {cache_file.parent}")
+            cache_file.unlink()
+        except Exception as e:
+            log.warning(f"  [Cache Clean] Gagal menghapus {cache_file.name}: {e}. Berkas mungkin sedang dikunci.")
+
+
+def prepare_person_dataset() -> str:
+    """
+    Menghasilkan dataset baru yang berisi label deteksi person saja (class 0).
+    Label person didapat dari model pretrained + fallback clustering pada anotasi APD.
+    """
+    import yaml
+    import cv2
+    
+    orig_yaml_path = Path(CONFIG["original_yaml"])
+    person_dir = Path("assets/dataset_person")
+    person_yaml_path = Path(CONFIG["person_yaml"])
+    
+    # Load original data.yaml
+    with open(orig_yaml_path, "r", encoding="utf-8") as f:
+        data_cfg = yaml.safe_load(f)
+        
+    if person_dir.exists() and CONFIG.get("force_recreate", False):
+        log.info("  [Preprocess Person] 'force_recreate' aktif. Menghapus folder dataset person lama...")
+        clean_dataset_caches(person_dir)
+        shutil.rmtree(person_dir, ignore_errors=True)
+        if person_yaml_path.exists():
+            try:
+                person_yaml_path.unlink()
+            except Exception:
+                pass
+                
+    if person_yaml_path.exists():
+        log.info(f"  [Preprocess Person] Dataset person sudah ada di: {person_yaml_path.resolve()}")
+        return str(person_yaml_path)
+        
+    log.info("=" * 60)
+    log.info("  [Preprocess Person] MENYIAPKAN DATASET DETEKSI PERSON (STAGE 1)")
+    log.info("=" * 60)
+    
+    orig_base_dir = orig_yaml_path.parent
+    
+    # Inisialisasi model person detector
+    log.info("  Memuat model YOLOv8n untuk pseudo-labeling person...")
+    person_model = YOLO(CONFIG["model_weights"])
+    
+    splits = {
+        "train": data_cfg.get("train", "../train/images"),
+        "val": data_cfg.get("val", "../valid/images"),
+        "test": data_cfg.get("test", "../test/images")
+    }
+    
+    # Buat direktori tujuan
+    for split in splits.keys():
+        (person_dir / split / "images").mkdir(parents=True, exist_ok=True)
+        (person_dir / split / "labels").mkdir(parents=True, exist_ok=True)
+        
+    for split_name, rel_path in splits.items():
+        img_dir = (orig_base_dir / rel_path).resolve()
+        if not img_dir.exists():
+            clean_path = rel_path.replace("../", "")
+            alt_dir = (orig_base_dir / clean_path).resolve()
+            if alt_dir.exists():
+                img_dir = alt_dir
+            else:
+                possible_paths = [
+                    f"{split_name}/images",
+                    f"valid/images" if split_name == "val" else "",
+                    f"test/images" if split_name == "test" else ""
+                ]
+                found = False
+                for p in possible_paths:
+                    if p:
+                        alt_dir = (orig_base_dir / p).resolve()
+                        if alt_dir.exists():
+                            img_dir = alt_dir
+                            found = True
+                            break
+                if not found:
+                    log.error(f"  Gagal menemukan direktori asli untuk split '{split_name}'.")
+                    continue
+                    
+        log.info(f"  Memproses split '{split_name}' dari {img_dir}...")
+        img_files = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.jpeg")) + list(img_dir.glob("*.png"))
+        
+        person_count = 0
+        
+        for img_path in img_files:
+            label_dir = img_path.parent.parent / "labels"
+            label_path = label_dir / f"{img_path.stem}.txt"
+            
+            orig_labels = []
+            if label_path.exists():
+                with open(label_path, "r", encoding="utf-8") as lf:
+                    for line in lf:
+                        parts = line.strip().split()
+                        if len(parts) == 5:
+                            cls_id = int(parts[0])
+                            cx, cy, w, h = map(float, parts[1:])
+                            orig_labels.append((cls_id, cx, cy, w, h))
+            
+            img = cv2.imread(str(img_path))
+            if img is None:
+                continue
+            H, W, _ = img.shape
+            
+            # Deteksi person
+            results = person_model(img, classes=0, conf=0.25, verbose=False)
+            boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
+            
+            # Tambahkan fallback person boxes dari APD unassigned
+            fallback_boxes = cluster_unassigned_ppe(orig_labels, boxes, W, H)
+            if fallback_boxes:
+                boxes.extend(fallback_boxes)
+                
+            # Simpan label person ke target (format YOLO: 0 cx cy w h)
+            out_label_path = person_dir / split_name / "labels" / f"{img_path.stem}.txt"
+            person_boxes_written = 0
+            
+            with open(out_label_path, "w", encoding="utf-8") as out_f:
+                for box in boxes:
+                    x1, y1, x2, y2 = box[:4]
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(W, x2), min(H, y2)
+                    
+                    cx = (x1 + x2) / 2.0 / W
+                    cy = (y1 + y2) / 2.0 / H
+                    w = (x2 - x1) / W
+                    h = (y2 - y1) / H
+                    
+                    if w > 0.01 and h > 0.01:
+                        out_f.write(f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+                        person_boxes_written += 1
+                        
+            # Tulis gambar yang sudah di-resize ke target untuk meminimalkan RAM/VRAM
+            out_img_path = person_dir / split_name / "images" / img_path.name
+            
+            # Resize jika ukuran gambar terlalu besar (misal > 1024px) untuk mencegah OOM pada Windows
+            max_size = 1024
+            if max(H, W) > max_size:
+                scale = max_size / max(H, W)
+                img_to_save = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            else:
+                img_to_save = img
+                
+            cv2.imwrite(str(out_img_path), img_to_save)
+            person_count += person_boxes_written
+            
+        log.info(f"  ✓ Split '{split_name}': berhasil menyimpan {len(img_files)} gambar dengan total {person_count} orang.")
+        
+    # Buat data_person.yaml
+    person_yaml_content = {
+        "path": str(person_dir.resolve()),
+        "train": "train/images",
+        "val": "val/images",
+        "test": "test/images",
+        "nc": 1,
+        "names": ["person"]
+    }
+    
+    with open(person_yaml_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(person_yaml_content, f, default_flow_style=False)
+        
+    log.info(f"  ✓ File konfigurasi dataset person ditulis di: {person_yaml_path.resolve()}")
+    log.info("=" * 60)
+    
+    return str(person_yaml_path)
+
+
+def train_person_model() -> Path:
+    """Melatih model YOLOv8n untuk mendeteksi class person saja."""
+    log.info("=" * 60)
+    log.info("  [Training] MELATIH CUSTOM PERSON DETECTOR (STAGE 1)")
+    log.info("=" * 60)
+    
+    # Tentukan bobot model (cek jika ingin resume)
+    weights_path = CONFIG["model_weights"]
+    is_resuming = False
+    
+    if CONFIG.get("resume_person", False):
+        last_person_path = Path(CONFIG["runs_dir"]) / (CONFIG["project_name"] + "_person") / "weights" / "last.pt"
+        if last_person_path.exists():
+            weights_path = str(last_person_path)
+            is_resuming = True
+            log.info(f"  [Resume] Melanjutkan pelatihan person dari checkpoint: {last_person_path}")
+        else:
+            # Fallback pencarian rekursif jika nama folder diubah otomatis oleh YOLO (misal protmind_balanced_v3_person-2)
+            candidates = list(Path(CONFIG["runs_dir"]).rglob("**/weights/last.pt"))
+            # Filter kandidat untuk yang memiliki _person di namanya
+            candidates = [c for c in candidates if "_person" in str(c)]
+            if candidates:
+                candidates.sort(key=lambda x: x.stat().st_mtime)
+                last_person_path = candidates[-1]
+                weights_path = str(last_person_path)
+                is_resuming = True
+                log.info(f"  [Resume] Checkpoint person ditemukan lewat pencarian fallback: {last_person_path}")
+            else:
+                log.warning(f"  [Resume] Checkpoint person tidak ditemukan. Pelatihan dimulai dari awal.")
+                
+    log.info(f"  Memuat weights: {weights_path}")
+    model = YOLO(weights_path)
+    
+    project_abs_path = str(Path(CONFIG["runs_dir"]).resolve())
+    
+    model.train(
+        data          = CONFIG["person_yaml"],
+        epochs        = CONFIG.get("epochs_person", 50),
+        imgsz         = CONFIG["imgsz"],
+        batch         = CONFIG["batch"],
+        patience      = CONFIG["patience"],
+        lr0           = CONFIG["lr0"],
+        lrf           = CONFIG["lrf"],
+        momentum      = CONFIG["momentum"],
+        weight_decay  = CONFIG["weight_decay"],
+        warmup_epochs = CONFIG["warmup_epochs"],
+        augment       = CONFIG["augment"],
+        device        = CONFIG["device"],
+        workers       = CONFIG["workers"],
+        amp           = CONFIG["amp"],
+        seed          = CONFIG["seed"],
+        project       = project_abs_path,
+        name          = CONFIG["project_name"] + "_person",
+        exist_ok      = True,
+        verbose       = True,
+        save          = True,
+        val           = True,
+        plots         = True,
+        resume        = is_resuming
+    )
+    
+    if hasattr(model, "trainer") and model.trainer is not None and hasattr(model.trainer, "save_dir"):
+        run_dir = Path(model.trainer.save_dir)
+    else:
+        run_dir = find_latest_run(CONFIG["project_name"] + "_person")
+        
+    if not run_dir:
+        raise RuntimeError("Gagal menemukan direktori hasil pelatihan person.")
+        
+    src = run_dir / "weights" / "best.pt"
+    dst = Path(CONFIG["output_person_model"])
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    log.info(f"  ✓ Model person kustom terbaik disimpan ke: {dst.resolve()}")
+    
+    return dst
+
+
+# def apply_programmatic_augmentations(img, labels):
+#     """
+#     Menerapkan augmentasi programmatif lokal secara acak:
+#     1. Horizontal Flip (50% chance), dengan pembalikan koordinat BBox.
+#     2. Brightness Adjustment (faktor acak dari 0.8 hingga 1.2 / -20% hingga +20%).
+#     3. Gaussian Blur (maksimal 2px).
+#     """
+#     import random
+#     import cv2
+#     import numpy as np
+#     
+#     h_flipped = False
+#     augmented_img = img.copy()
+#     augmented_labels = [list(lbl) for lbl in labels]
+#     
+#     # 1. Horizontal Flip (50% probabilitas)
+#     if random.random() < 0.5:
+#         augmented_img = cv2.flip(augmented_img, 1)
+#         h_flipped = True
+#         for lbl in augmented_labels:
+#             # lbl format: [cls_id, cx, cy, w, h]
+#             # cx baru = 1.0 - cx lama
+#             lbl[1] = 1.0 - lbl[1]
+# 
+#     # 2. Brightness adjustment (-20% hingga +20%)
+#     hsv = cv2.cvtColor(augmented_img, cv2.COLOR_BGR2HSV)
+#     h, s, v = cv2.split(hsv)
+#     brightness_factor = random.uniform(0.8, 1.2)
+#     v_new = np.clip(v.astype(np.int32) * brightness_factor, 0, 255).astype(np.uint8)
+#     hsv_new = cv2.merge([h, s, v_new])
+#     augmented_img = cv2.cvtColor(hsv_new, cv2.COLOR_HSV2BGR)
+# 
+#     # 3. Gaussian Blur (maksimal 2px)
+#     blur_choice = random.choice([0, 1, 2])
+#     if blur_choice == 1:
+#         # Gaussian blur kernel 3x3, sigmaX=1.0
+#         augmented_img = cv2.GaussianBlur(augmented_img, (3, 3), sigmaX=random.uniform(0.5, 1.5))
+#     elif blur_choice == 2:
+#         # Gaussian blur kernel 5x5, sigmaX=2.0 (maksimal 2px)
+#         augmented_img = cv2.GaussianBlur(augmented_img, (5, 5), sigmaX=random.uniform(1.0, 2.0))
+#         
+#     return augmented_img, augmented_labels
+
+
 def prepare_cropped_dataset() -> str:
     """
     Menghasilkan dataset baru yang berisi potongan (crops) person dari dataset asli.
@@ -152,6 +549,16 @@ def prepare_cropped_dataset() -> str:
     # Load original data.yaml
     with open(orig_yaml_path, "r", encoding="utf-8") as f:
         data_cfg = yaml.safe_load(f)
+        
+    if cropped_dir.exists() and CONFIG.get("force_recreate", False):
+        log.info("  [Preprocess] 'force_recreate' aktif. Menghapus folder dataset cropped lama...")
+        clean_dataset_caches(cropped_dir)
+        shutil.rmtree(cropped_dir, ignore_errors=True)
+        if cropped_yaml_path.exists():
+            try:
+                cropped_yaml_path.unlink()
+            except Exception:
+                pass
         
     if cropped_yaml_path.exists():
         log.info(f"  [Preprocess] Dataset cropped sudah ada di: {cropped_yaml_path.resolve()}")
@@ -175,7 +582,7 @@ def prepare_cropped_dataset() -> str:
         except Exception as e:
             log.warning(f"  Gagal memvalidasi/memperbarui data_cropped.yaml: {e}")
             
-        log.info("  Melewati proses cropping. Jika ingin regenerasi, silakan hapus folder 'assets/dataset_cropped'.")
+        log.info("  Melewati proses cropping. Jika ingin regenerasi, silakan aktifkan 'force_recreate' di CONFIG atau hapus folder 'assets/dataset_cropped'.")
         return str(cropped_yaml_path)
         
     log.info("=" * 60)
@@ -185,8 +592,13 @@ def prepare_cropped_dataset() -> str:
     orig_base_dir = orig_yaml_path.parent
     
     # Inisialisasi model person detector (Stage 1)
-    log.info("  Memuat model YOLOv8n untuk deteksi person...")
-    person_model = YOLO(CONFIG["model_weights"])
+    custom_person_path = Path(CONFIG.get("output_person_model", "models/best_person.pt"))
+    if custom_person_path.exists():
+        log.info(f"  Memuat model person kustom hasil pelatihan: {custom_person_path.resolve()}")
+        person_model = YOLO(str(custom_person_path))
+    else:
+        log.warning(f"  Model person kustom tidak ditemukan di {custom_person_path.resolve()}. Menggunakan model pretrained: {CONFIG['model_weights']}")
+        person_model = YOLO(CONFIG["model_weights"])
     
     splits = {
         "train": data_cfg.get("train", "../train/images"),
@@ -254,9 +666,14 @@ def prepare_cropped_dataset() -> str:
                 continue
             H, W, _ = img.shape
             
-            # Deteksi person (class 0 pada COCO)
-            results = person_model(img, classes=0, verbose=False)
-            boxes = results[0].boxes.xyxy.cpu().numpy() # [x1, y1, x2, y2]
+            # Deteksi person (class 0 pada model kustom atau pretrained)
+            results = person_model(img, classes=0, conf=0.25, verbose=False)
+            boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
+            
+            # Tambahkan fallback person boxes dari APD unassigned
+            fallback_boxes = cluster_unassigned_ppe(orig_labels, boxes, W, H)
+            if fallback_boxes:
+                boxes.extend(fallback_boxes)
             
             for idx, box in enumerate(boxes):
                 x1, y1, x2, y2 = map(int, box[:4])
@@ -318,17 +735,8 @@ def prepare_cropped_dataset() -> str:
                         
                         crop_labels.append((cls_id, cx_norm, cy_norm, w_norm, h_norm))
                         
-                # Oversampling dinamis untuk menyeimbangkan kelas minoritas (hanya untuk data train agar tidak data leakage)
+                # Oversampling dinonaktifkan karena dataset asli sudah diaugmentasi di Roboflow
                 oversample_factor = 1
-                if split_name == "train":
-                    for lbl in crop_labels:
-                        cls_id = lbl[0]
-                        if cls_id == 2:    # no-safety shoes (~9% dari total data) -> oversample 3x
-                            oversample_factor = max(oversample_factor, 3)
-                        elif cls_id == 1:  # no-helmet (~10% dari total data) -> oversample 3x
-                            oversample_factor = max(oversample_factor, 3)
-                        elif cls_id == 3:  # no-vest (~15% dari total data) -> oversample 2x
-                            oversample_factor = max(oversample_factor, 2)
 
                 for r in range(oversample_factor):
                     suffix = f"_r{r}" if r > 0 else ""
@@ -338,8 +746,19 @@ def prepare_cropped_dataset() -> str:
                     crop_img_out = cropped_dir / split_name / "images" / crop_img_name
                     crop_lbl_out = cropped_dir / split_name / "labels" / crop_label_name
                     
-                    cv2.imwrite(str(crop_img_out), crop_img)
-                    
+                    # Resize crop agar maksimal berukuran CONFIG["imgsz"] (640px)
+                    # Ini mencegah Out Of Memory pada OpenCV dan mempercepat training
+                    crop_h_orig, crop_w_orig = crop_img.shape[:2]
+                    max_crop_size = CONFIG.get("imgsz", 640)
+                    if max(crop_h_orig, crop_w_orig) > max_crop_size:
+                        scale = max_crop_size / max(crop_h_orig, crop_w_orig)
+                        crop_img_to_save = cv2.resize(
+                            crop_img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA
+                        )
+                    else:
+                        crop_img_to_save = crop_img
+                        
+                    cv2.imwrite(str(crop_img_out), crop_img_to_save)
                     with open(crop_lbl_out, "w", encoding="utf-8") as out_f:
                         for lbl in crop_labels:
                             out_f.write(f"{lbl[0]} {lbl[1]:.6f} {lbl[2]:.6f} {lbl[3]:.6f} {lbl[4]:.6f}\n")
@@ -641,15 +1060,22 @@ def generate_summary_dashboard(data: dict, graphs_dir: Path, epochs: list[int]) 
     log.info(f"  [Grafik] Dashboard → {out}")
 
 
-def generate_all_graphs(run_dir: Path) -> None:
+def generate_all_graphs(run_dir: Path, timestamp: str = None) -> None:
     """Orkestrasi semua pembuatan grafik setelah training selesai."""
     log.info("")
     log.info("=" * 60)
     log.info("  ANALISIS GRAFIK PELATIHAN")
     log.info("=" * 60)
 
+    # 1. Tentukan direktori grafik default (models/training_graphs)
     graphs_dir = Path(CONFIG["graphs_dir"])
     graphs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 2. Tentukan direktori grafik ber-timestamp jika ada
+    graphs_ts_dir = None
+    if timestamp:
+        graphs_ts_dir = graphs_dir.parent / f"training_graphs_{timestamp}"
+        graphs_ts_dir.mkdir(parents=True, exist_ok=True)
 
     data = load_results_csv(run_dir)
     if not data:
@@ -663,6 +1089,8 @@ def generate_all_graphs(run_dir: Path) -> None:
 
     # Sesuai permintaan pengguna: hanya grafik kustom dashboard saja
     generate_summary_dashboard(data, graphs_dir, epochs)
+    if graphs_ts_dir:
+        generate_summary_dashboard(data, graphs_ts_dir, epochs)
 
     # Salin grafik bawaan YOLOv8 jika tersedia
     yolo_graphs = [
@@ -678,13 +1106,19 @@ def generate_all_graphs(run_dir: Path) -> None:
         src_g = run_dir / g
         if src_g.exists():
             try:
+                # Salin ke folder default
                 shutil.copy2(src_g, graphs_dir / g)
+                # Salin ke folder ber-timestamp
+                if graphs_ts_dir:
+                    shutil.copy2(src_g, graphs_ts_dir / g)
                 log.info(f"  [Grafik] Berhasil menyalin grafik bawaan YOLOv8: {g}")
             except Exception as e:
                 log.warning(f"  [Grafik] Gagal menyalin grafik {g}: {e}")
 
     log.info("")
-    log.info(f"  ✓ Semua grafik tersimpan di: {graphs_dir.resolve()}")
+    log.info(f"  ✓ Grafik default tersimpan di: {graphs_dir.resolve()}")
+    if graphs_ts_dir:
+        log.info(f"  ✓ Grafik versi baru tersimpan di: {graphs_ts_dir.resolve()}")
     log.info("=" * 60)
 
 
@@ -693,8 +1127,33 @@ def generate_all_graphs(run_dir: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def run_training() -> Path:
     """Eksekusi pelatihan YOLOv8n dan kembalikan path direktori run hasil training."""
-    log.info("  Memuat pretrained weights YOLOv8n...")
-    model = YOLO(CONFIG["model_weights"])
+    # Tentukan bobot model (cek jika ingin resume)
+    weights_path = CONFIG["model_weights"]
+    is_resuming = False
+    
+    if CONFIG.get("resume", False):
+        last_path = Path(CONFIG["runs_dir"]) / CONFIG["project_name"] / "weights" / "last.pt"
+        if last_path.exists():
+            weights_path = str(last_path)
+            is_resuming = True
+            log.info(f"  [Resume] Melanjutkan pelatihan APD dari checkpoint: {last_path}")
+        else:
+            # Fallback pencarian rekursif jika nama folder diubah otomatis oleh YOLO (misal protmind_balanced_v3-2)
+            candidates = list(Path(CONFIG["runs_dir"]).rglob("**/weights/last.pt"))
+            # Filter kandidat untuk yang tidak memiliki _person di namanya
+            candidates = [c for c in candidates if "_person" not in str(c)]
+            if candidates:
+                # Ambil kandidat paling baru berdasarkan waktu modifikasi
+                candidates.sort(key=lambda x: x.stat().st_mtime)
+                last_path = candidates[-1]
+                weights_path = str(last_path)
+                is_resuming = True
+                log.info(f"  [Resume] Checkpoint ditemukan lewat pencarian fallback: {last_path}")
+            else:
+                log.warning(f"  [Resume] Checkpoint APD tidak ditemukan. Pelatihan dimulai dari awal.")
+
+    log.info(f"  Memuat weights: {weights_path}")
+    model = YOLO(weights_path)
 
     log.info("  Memulai pelatihan...")
     start_time = time.time()
@@ -721,20 +1180,27 @@ def run_training() -> Path:
         fliplr        = CONFIG["fliplr"],
         mosaic        = CONFIG["mosaic"],
         mixup         = CONFIG["mixup"],
+        degrees       = CONFIG.get("degrees", 0.0),
+        translate     = CONFIG.get("translate", 0.1),
+        scale         = CONFIG.get("scale", 0.5),
+        shear         = CONFIG.get("shear", 0.0),
         device        = CONFIG["device"],
         workers       = CONFIG["workers"],          # 0 di Windows → pin_memory otomatis nonaktif
         amp           = CONFIG["amp"],
         seed          = CONFIG["seed"],
         freeze        = CONFIG["freeze"],           # Bekukan layer backbone awal untuk transfer learning lebih stabil
         cls           = CONFIG["cls"],              # Tingkatkan bobot klasifikasi untuk menyeimbangkan kelas minoritas
+        cos_lr        = CONFIG.get("cos_lr", False), # Gunakan Cosine Learning Rate scheduler
+        label_smoothing = CONFIG.get("label_smoothing", 0.0), # Gunakan Label Smoothing untuk mencegah overfitting
         project       = project_abs_path,
         name          = CONFIG["project_name"],
-        exist_ok      = False,
+        exist_ok      = True,
         verbose       = True,
         save          = True,
         save_period   = 10,         # simpan checkpoint setiap 10 epoch
         val           = True,
         plots         = True,       # YOLO akan buat plot bawaannya juga
+        resume        = is_resuming
     )
 
     elapsed = time.time() - start_time
@@ -757,24 +1223,107 @@ def run_training() -> Path:
     raise RuntimeError("Gagal menentukan direktori hasil pelatihan.")
 
 
-def copy_best_model(run_dir: Path) -> None:
-    """Salin best.pt ke direktori models/ agar mudah diakses."""
+def copy_best_model(run_dir: Path, timestamp: str = None) -> None:
+    """Salin best.pt ke direktori models/ dan folder grafik bertanggal agar mudah diakses."""
     src = run_dir / "weights" / "best.pt"
-    dst = Path(CONFIG["output_model"])
-    dst.parent.mkdir(parents=True, exist_ok=True)
-
-    if src.exists():
-        shutil.copy2(src, dst)
-        size_mb = dst.stat().st_size / 1e6
-        log.info(f"  ✓ Model terbaik disalin: {dst.resolve()} ({size_mb:.1f} MB)")
-    else:
+    
+    if not src.exists():
         log.error(f"  best.pt tidak ditemukan di: {src}")
+        return
+        
+    # 1. Salin ke default path (models/best_ppe.pt)
+    dst_default = Path(CONFIG["output_model"])
+    dst_default.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst_default)
+    size_mb = dst_default.stat().st_size / 1e6
+    log.info(f"  ✓ Model terbaik disalin ke default: {dst_default.resolve()} ({size_mb:.1f} MB)")
+    
+    # 2. Salin ke path ber-timestamp jika ada
+    if timestamp:
+        dst_ts = dst_default.parent / f"best_ppe_{timestamp}.pt"
+        shutil.copy2(src, dst_ts)
+        log.info(f"  ✓ Model terbaik versi baru disimpan: {dst_ts.resolve()}")
+        
+        # 3. Salin ke folder training_graphs_{timestamp}/best.pt
+        dst_graph_dir = Path(CONFIG["graphs_dir"]).parent / f"training_graphs_{timestamp}"
+        dst_graph_dir.mkdir(parents=True, exist_ok=True)
+        dst_graph_best = dst_graph_dir / "best.pt"
+        shutil.copy2(src, dst_graph_best)
+        log.info(f"  ✓ Model terbaik disalin ke folder grafik timestamp: {dst_graph_best.resolve()}")
+
+
+def evaluate_best_model(model_path: str, data_yaml: str):
+    """
+    Menjalankan validasi pada model terbaik untuk mengekstrak metrik per kelas secara mendalam,
+    terutama memantau kelas minoritas 'no-safety shoes'.
+    """
+    log.info("")
+    log.info("=" * 60)
+    log.info("  EVALUASI MENDALAM MODEL TERBAIK PER KELAS")
+    log.info("=" * 60)
+    try:
+        model = YOLO(model_path)
+        metrics = model.val(data=data_yaml, split="val", verbose=False)
+        
+        # Ambil daftar nama kelas
+        class_names = metrics.names
+        
+        # Ambil metrik per kelas
+        log.info(f"{'Kelas':<20} | {'Precision':<10} | {'Recall':<10} | {'mAP50':<10} | {'mAP50-95':<10}")
+        log.info("-" * 68)
+        
+        for i, name in class_names.items():
+            p = metrics.box.p[i] if i < len(metrics.box.p) else 0.0
+            r = metrics.box.r[i] if i < len(metrics.box.r) else 0.0
+            ap50 = metrics.box.ap50[i] if i < len(metrics.box.ap50) else 0.0
+            ap50_95 = metrics.box.ap[i] if i < len(metrics.box.ap) else 0.0
+            
+            log.info(f"{name:<20} | {p:<10.4f} | {r:<10.4f} | {ap50:<10.4f} | {ap50_95:<10.4f}")
+            
+            # Peringatan khusus untuk kelas dengan ap50 < 0.8
+            if ap50 < 0.8:
+                log.warning(f"  [PERINGATAN] Kelas '{name}' memiliki mAP50 ({ap50:.4f}) di bawah target 85%!")
+                
+        # Tampilkan ringkasan overall
+        log.info("-" * 68)
+        log.info(f"{'OVERALL':<20} | {metrics.box.mp:<10.4f} | {metrics.box.mr:<10.4f} | {metrics.box.map50:<10.4f} | {metrics.box.map:<10.4f}")
+        log.info("=" * 60)
+    except Exception as e:
+        log.error(f"Gagal menjalankan evaluasi per kelas: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Protmind YOLOv8 Training Pipeline")
+    parser.add_argument("--dry-run", action="store_true", help="Hanya melakukan preprocessing dataset, cropping, dan pengecekan tanpa pelatihan.")
+    parser.add_argument("--epochs", type=int, default=None, help="Jumlah epoch pelatihan model APD/Stage 2 (default dari CONFIG: 100).")
+    parser.add_argument("--epochs-person", type=int, default=None, help="Jumlah epoch pelatihan model Person/Stage 1 (default dari CONFIG: 50).")
+    parser.add_argument("--resume", action="store_true", help="Melanjutkan pelatihan model APD dari checkpoint last.pt.")
+    parser.add_argument("--resume-person", action="store_true", help="Melanjutkan pelatihan model Person dari checkpoint last.pt.")
+    parser.add_argument("--train-person", action="store_true", help="Paksa latih ulang model Person Detector (Stage 1) bahkan jika models/best_person.pt sudah ada.")
+    parser.add_argument("--recreate", action="store_true", help="Paksa regenerasi dataset cropped.")
+    args = parser.parse_args()
+
+    # Perbarui konfigurasi dinamis berdasarkan argumen CLI
+    if args.epochs is not None:
+        CONFIG["epochs"] = args.epochs
+        log.info(f"  [CLI Override] Epoch APD (Stage 2) diatur ke: {args.epochs}")
+    if args.epochs_person is not None:
+        CONFIG["epochs_person"] = args.epochs_person
+        log.info(f"  [CLI Override] Epoch Person (Stage 1) diatur ke: {args.epochs_person}")
+    if args.resume:
+        CONFIG["resume"] = True
+        log.info("  [CLI Override] Mode Resume diaktifkan untuk model APD (Stage 2).")
+    if args.resume_person:
+        CONFIG["resume_person"] = True
+        log.info("  [CLI Override] Mode Resume diaktifkan untuk model Person (Stage 1).")
+    if args.recreate:
+        CONFIG["force_recreate"] = True
+        log.info("  [CLI Override] Paksa regenerasi dataset cropped diaktifkan.")
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log.info(f"  Sesi dimulai: {timestamp}")
 
@@ -782,36 +1331,57 @@ def main():
     verify_environment()
 
     # Cek mode dry-run (hanya penyiapan dataset/cropping)
-    if "--dry-run" in sys.argv:
+    if args.dry_run:
         log.info("  [Dry-Run] Menjalankan uji coba penyiapan dataset...")
+        if CONFIG.get("train_person", False):
+            prepare_person_dataset()
         if CONFIG["two_stage"]:
             prepare_cropped_dataset()
         log.info("")
         log.info("=" * 60)
         log.info("  ✓ DRY RUN PENYIAPAN DATASET SELESAI")
-        log.info("  Dataset cropped person siap digunakan untuk pelatihan asli.")
+        log.info("  Dataset person dan cropped person siap digunakan untuk pelatihan asli.")
         log.info("=" * 60)
         sys.exit(0)
 
-    # 2. Jalankan pemotongan dataset jika mode Two-Stage aktif
+    # 2. Latih model Stage 1 (Person Detector) jika dikonfigurasi
+    if CONFIG.get("train_person", False):
+        custom_person_path = Path(CONFIG["output_person_model"])
+        if custom_person_path.exists() and not args.train_person:
+            log.info(f"  [Stage 1] Model person kustom dideteksi di: {custom_person_path.resolve()}")
+            log.info("  Melewati pelatihan Stage 1. Menggunakan model person kustom yang sudah ada untuk cropping.")
+        else:
+            person_yaml = prepare_person_dataset()
+            CONFIG["person_yaml"] = person_yaml
+            train_person_model()
+
+    # 3. Jalankan pemotongan dataset jika mode Two-Stage aktif
     if CONFIG["two_stage"]:
         cropped_yaml = prepare_cropped_dataset()
         CONFIG["data_yaml"] = cropped_yaml
 
-    # 3. Jalankan training dan dapatkan direktori hasil secara langsung
+    # 4. Jalankan training dan dapatkan direktori hasil secara langsung
     run_dir = run_training()
     log.info(f"  Direktori run aktif: {run_dir.resolve()}")
+    
+    # Hasilkan timestamp untuk versi unik model dan grafik
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # 5. Salin best.pt ke models/
-    copy_best_model(run_dir)
+    # 5. Salin best.pt ke models/ (sebagai file default dan file ber-timestamp)
+    copy_best_model(run_dir, timestamp=run_timestamp)
 
-    # 6. Hasilkan semua grafik analisis
-    generate_all_graphs(run_dir)
+    # Evaluasi kelas minoritas secara detail
+    evaluate_best_model(CONFIG["output_model"], CONFIG["data_yaml"])
+
+    # 6. Hasilkan semua grafik analisis (di folder default dan folder ber-timestamp)
+    generate_all_graphs(run_dir, timestamp=run_timestamp)
 
     log.info("")
     log.info("=" * 60)
     log.info("  ✓ PIPELINE TRAINING PROTMIND SELESAI")
-    log.info(f"  Model siap deploy: {CONFIG['output_model']}")
+    log.info(f"  Model PPE siap deploy: {CONFIG['output_model']}")
+    if CONFIG.get("train_person", False):
+        log.info(f"  Model Person siap deploy: {CONFIG['output_person_model']}")
     log.info("=" * 60)
 
 

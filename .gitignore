@@ -15,18 +15,22 @@ ENV/
 assets/dataset_cropped/
 *.pt
 *.engine
-*.onnx
 
 assets/dataset/
 *.pt
 *.engine
-*.onnx
 
 assets/audio/
 *.wav
 
+assets/dataset_person/
+*.pt
+*.engine
+
 # Training Runs & Logs
-runs/
+runs/*
+!runs/protmind_model10/
+!runs/protmind_model10_person/
 *.log
 training.log
 inference.log
@@ -45,3 +49,6 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Global Unignores
+!*.onnx

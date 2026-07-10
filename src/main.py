@@ -44,16 +44,21 @@ CONFIG = {
     "lokasi_kamera"     : os.getenv("LOKASI_KAMERA", "Gate 1 - Area Proyek Alpha"),
 
     # Konfigurasi Model
-    "model_person"      : "yolov8n.pt",         # Model Stage 1 untuk deteksi person bawaan YOLOv8
-    "model_ppe"         : "models/best_ppe.pt", # Model Stage 2 hasil training pada cropped person
+    "model_person"      : "models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt",         # Model Stage 1 kustom (fallback ke pre-trained YOLOv8n)
+    "model_ppe"         : "models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260607_223158.pt", # Model Stage 2 kustom (fallback ke checkpoint lama)
 
     # Nilai Ambang Batas Kepercayaan (Confidence Threshold)
-    "conf_person"       : 0.40,
-    "conf_ppe"          : 0.40,
+    "conf_person"       : 0.50,
+    "conf_ppe"          : 0.50,
 
     # Manajemen Alarm & Audio
     "cooldown_time"     : int(os.getenv("COOLDOWN_TIME", "10")), # Jeda waktu minimum (detik) alarm sejenis tidak boleh berulang-ulang
     "audio_delay"       : int(os.getenv("AUDIO_DELAY", "3")),   # Jeda waktu (detik) pemutaran audio bergiliran (Round-Robin)
+
+    # Kalibrasi Kamera untuk Jarak
+    "camera_height"     : float(os.getenv("CAMERA_HEIGHT", "1.0")),
+    "camera_tilt"       : float(os.getenv("CAMERA_TILT", "0.0")),
+    "camera_vfov"       : float(os.getenv("CAMERA_VFOV", "48.0")),
 
     # Path Audio Peringatan
     "audio_helm"        : "assets/audio/peringatan_helm.wav",
@@ -78,6 +83,114 @@ log = logging.getLogger("PROTMIND-MAIN")
 # ─────────────────────────────────────────────────────────────────────────────
 # MAINKAN AUDIO LINTAS PLATFORM (Windows & Linux / Jetson Nano)
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNGSI PENDUKUNG ESTIMASI JARAK & METRIK SISTEM & KOMBINASI AUDIO
+# ─────────────────────────────────────────────────────────────────────────────
+def estimate_distance(y_bottom: float, frame_height: float) -> float:
+    """
+    Menghitung jarak monokular ke pekerja menggunakan rumus trigonometri.
+    Asumsi kamera dipasang horizontal / tegak lurus (tilt = 0.0 derajat).
+    """
+    try:
+        h_c = float(CONFIG.get("camera_height", 1.0))
+        tilt = float(CONFIG.get("camera_tilt", 0.0))
+        vfov = float(CONFIG.get("camera_vfov", 48.0))
+        
+        if frame_height <= 0:
+            return 0.0
+            
+        # Normalisasi Y bottom relative ke center: -1.0 di atas, 0.0 di tengah, 1.0 di bawah
+        y_norm = (y_bottom - frame_height / 2.0) / (frame_height / 2.0)
+        
+        # Sudut depresi (offset dari optical axis horizontal)
+        angle_offset = y_norm * (vfov / 2.0)
+        
+        # Total sudut depresi dari horizontal
+        total_angle = tilt + angle_offset
+        
+        # Batasi agar sudut tetap logis untuk mencegah pembagian dengan nilai ekstrem
+        if total_angle <= 0.5:
+            total_angle = 0.5
+            
+        total_angle_rad = np.radians(total_angle)
+        
+        # Trigonometri: Jarak = Tinggi Kamera / tan(Sudut)
+        distance = h_c / np.tan(total_angle_rad)
+        
+        return round(distance, 2)
+    except Exception as e:
+        log.error(f"  [Distance] Gagal mengestimasi jarak: {e}")
+        return 0.0
+
+
+def get_system_metrics() -> tuple[float, float, float]:
+    """
+    Mendapatkan pemakaian CPU, GPU, dan RAM secara real-time.
+    Mendukung NVIDIA Jetson Nano dan PC standar.
+    """
+    import psutil
+    
+    # 1. CPU Usage (%)
+    cpu_usage = psutil.cpu_percent()
+    
+    # 2. RAM Usage (%)
+    ram_usage = psutil.virtual_memory().percent
+    
+    # 3. GPU Usage (%)
+    gpu_usage = 0.0
+    # Coba baca tegra GPU load untuk Jetson Nano
+    for path in [
+        "/sys/devices/gpu.0/load",
+        "/sys/class/devfreq/gpu.0/device/load",
+        "/sys/devices/platform/host1x/17000000.gp10b/load"
+    ]:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    val = int(f.read().strip())
+                    gpu_usage = val / 10.0 if val > 100 else float(val)
+                    break
+            except Exception:
+                pass
+                
+    return cpu_usage, gpu_usage, ram_usage
+
+
+def get_combination_audio(violations: list) -> str | None:
+    """
+    Memetakan list pelanggaran APD ke berkas audio .wav kombinasi terintegrasi (8 variasi).
+    """
+    has_helmet = "no-helmet" in violations
+    has_vest = "no-vest" in violations
+    has_shoes = "no-safety shoes" in violations
+    
+    # Buat bitmask: [Helm, Rompi, Sepatu]
+    bitmask = (1 if has_helmet else 0) << 2 | (1 if has_vest else 0) << 1 | (1 if has_shoes else 0)
+    
+    if bitmask == 0:
+        return None
+        
+    mapping = {
+        0b100: "assets/audio/peringatan_helm.wav",
+        0b010: "assets/audio/peringatan_rompi.wav",
+        0b001: "assets/audio/peringatan_sepatu.wav",
+        0b110: "assets/audio/peringatan_helm_rompi.wav",
+        0b101: "assets/audio/peringatan_helm_sepatu.wav",
+        0b011: "assets/audio/peringatan_rompi_sepatu.wav",
+        0b111: "assets/audio/peringatan_lengkap.wav",
+    }
+    
+    audio_path = mapping.get(bitmask)
+    if audio_path and Path(audio_path).exists():
+        return audio_path
+        
+    fallback_path = "assets/audio/peringatan_umum.wav"
+    if Path(fallback_path).exists():
+        return fallback_path
+        
+    return None
+
+
 def play_audio(wav_path: str) -> None:
     """Memutar file audio secara asinkron tanpa menghentikan frame-rate video."""
     wav_file = Path(wav_path)
@@ -114,16 +227,26 @@ def play_audio(wav_path: str) -> None:
 # Menggunakan antrean asinkron agar proses pemutaran suara jeda 3 detik 
 # dan pengiriman Telegram tidak menyebabkan lag atau stuttering pada stream kamera.
 warning_queue = queue.Queue()
+exit_event = threading.Event()
 
 def warning_worker():
     """Mengambil tugas pelanggaran dari queue untuk memutar suara dan kirim Telegram."""
-    while True:
-        task = warning_queue.get()
+    while not exit_event.is_set():
+        try:
+            task = warning_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+            
         if task is None:
             break
         
         violations_to_play, text_report, annotated_frame = task
         
+        # Cek jika aplikasi akan keluar sebelum mengirim Telegram
+        if exit_event.is_set():
+            warning_queue.task_done()
+            break
+            
         # 1. Kirim Alarm Laporan ke Telegram
         if CONFIG["telegram_token"] and CONFIG["telegram_chat_id"]:
             log.info("  [Telegram] Mengirim notifikasi alarm pelanggaran APD...")
@@ -132,20 +255,19 @@ def warning_worker():
             log.warning("  [Telegram] Kredensial tidak dikonfigurasi. Laporan Telegram dilewati.")
             print(f"\n{text_report}\n")
 
-        # 2. Putar Audio Peringatan secara bergiliran (Round-Robin)
-        for violation in violations_to_play:
-            if violation == "no-helmet":
-                log.info("  [Audio Warning] Memutar peringatan HELM...")
-                play_audio(CONFIG["audio_helm"])
-            elif violation == "no-vest":
-                log.info("  [Audio Warning] Memutar peringatan ROMPI...")
-                play_audio(CONFIG["audio_rompi"])
-            elif violation == "no-safety shoes":
-                log.info("  [Audio Warning] Memutar peringatan SEPATU...")
-                play_audio(CONFIG["audio_sepatu"])
+        # 2. Putar 1 Audio Peringatan Terintegrasi (Kombinasi Bitmask)
+        audio_file = get_combination_audio(violations_to_play)
+        if audio_file:
+            log.info(f"  [Audio Warning] Memutar peringatan kombinasi: {Path(audio_file).name}...")
+            play_audio(audio_file)
             
-            # Berikan jeda 3 detik sebelum pemutaran suara berikutnya
-            time.sleep(CONFIG["audio_delay"])
+            # Berikan jeda non-blocking terhadap exit_event sebelum tugas berikutnya dapat dieksekusi
+            delay = CONFIG["audio_delay"]
+            steps = int(delay * 10)
+            for _ in range(steps):
+                if exit_event.is_set():
+                    break
+                time.sleep(0.1)
             
         warning_queue.task_done()
 
@@ -181,9 +303,61 @@ def send_telegram_photo(caption: str, frame: np.ndarray) -> None:
         log.error(f"  [Telegram] Kesalahan koneksi ke bot Telegram: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DETEKSI INDEKS KAMERA
+# ─────────────────────────────────────────────────────────────────────────────
+def list_available_cameras():
+    """Mendeteksi indeks kamera USB yang aktif di sistem."""
+    log.info("  [Camera] Mendeteksi kamera yang tersedia di sistem...")
+    available_indices = []
+    # Coba indeks 0 hingga 5
+    for index in range(6):
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                available_indices.append(index)
+            cap.release()
+    if available_indices:
+        log.info(f"  [Camera] Kamera aktif ditemukan pada indeks: {available_indices}")
+    else:
+        log.warning("  [Camera] Tidak ditemukan kamera aktif pada indeks 0-5.")
+    return available_indices
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DETEKSI UTAMA (INFERENCE ENGINE)
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="PROTMIND APD System — Inference Engine")
+    parser.add_argument("--source", type=str, default=None, help="Sumber kamera/video (indeks angka atau path video file).")
+    parser.add_argument("--list-cameras", action="store_true", help="Menampilkan daftar indeks kamera USB yang tersedia di laptop.")
+    parser.add_argument("--conf-person", type=float, default=None, help="Confidence threshold untuk model Person (default: 0.40).")
+    parser.add_argument("--conf-ppe", type=float, default=None, help="Confidence threshold untuk model PPE (default: 0.40).")
+    args = parser.parse_args()
+
+    if args.list_cameras:
+        list_available_cameras()
+        sys.exit(0)
+
+    # Perbarui konfigurasi dinamis berdasarkan argumen CLI
+    if args.source is not None:
+        if args.source.isdigit():
+            source = int(args.source)
+        else:
+            source = args.source
+        CONFIG["camera_source"] = source
+        log.info(f"  [CLI Override] Sumber kamera diatur ke: {source}")
+    else:
+        source = CONFIG["camera_source"]
+
+    if args.conf_person is not None:
+        CONFIG["conf_person"] = args.conf_person
+        log.info(f"  [CLI Override] Conf Person diatur ke: {args.conf_person}")
+
+    if args.conf_ppe is not None:
+        CONFIG["conf_ppe"] = args.conf_ppe
+        log.info(f"  [CLI Override] Conf PPE diatur ke: {args.conf_ppe}")
+
     # Load Models
     log.info("=" * 60)
     log.info("  PROTMIND APD SYSTEM — INFERENCE MODE")
@@ -221,7 +395,21 @@ def main():
     
     # Buka source kamera/video
     source = CONFIG["camera_source"]
-    cap = cv2.VideoCapture(source)
+    
+    # Gunakan GStreamer pipeline jika berjalan di Linux dan source adalah integer (kamera USB)
+    if platform.system() == "Linux" and isinstance(source, int):
+        # Gunakan v4l2src GStreamer pipeline untuk hardware-accelerated BGR decoding
+        gstreamer_pipeline = (
+            f"v4l2src device=/dev/video{source} ! "
+            "video/x-raw, width=640, height=480, format=YUY2, framerate=30/1 ! "
+            "videoconvert ! video/x-raw, format=BGR ! appsink drop=true sync=false"
+        )
+        log.info(f"  [Camera] Menggunakan GStreamer pipeline: {gstreamer_pipeline}")
+        cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+    else:
+        log.info(f"  [Camera] Menggunakan OpenCV standard backend untuk source: {source}")
+        cap = cv2.VideoCapture(source)
+        
     if not cap.isOpened():
         log.error(f"  Gagal membuka kamera atau video source: {source}")
         sys.exit(1)
@@ -232,198 +420,254 @@ def main():
 
     # Frame skipping untuk performa Jetson Nano
     frame_count = 0
+    prev_frame_time = time.time()
+    current_fps_frame = 0.0
+    current_fps_inf = 0.0
     
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            log.info("  Selesai memproses video (EOF) atau kamera terputus.")
-            break
-            
-        frame_count += 1
-        
-        # Salinan frame untuk anotasi visual
-        annotated_frame = frame.copy()
-        H, W, _ = frame.shape
-        
-        # Jalankan Deteksi Stage 1: Temukan Person (class 0 pada model COCO bawaan)
-        results_p = model_p(frame, classes=0, conf=CONFIG["conf_person"], verbose=False)
-        person_boxes = results_p[0].boxes.xyxy.cpu().numpy()
-        
-        total_people = len(person_boxes)
-        
-        # Koleksi pelanggaran yang terdeteksi di frame ini
-        frame_violations = []
-        
-        # Variabel ringkasan kepatuhan dan pelanggaran per individu untuk laporan
-        melanggar_count = 0
-        lengkap_count = 0
-        
-        no_helmet_count = 0
-        no_vest_count = 0
-        no_shoes_count = 0
-        
-        for p_idx, p_box in enumerate(person_boxes):
-            px1, py1, px2, py2 = map(int, p_box[:4])
-            
-            # Batasi koordinat agar berada dalam frame gambar
-            px1, py1 = max(0, px1), max(0, py1)
-            px2, py2 = min(W, px2), min(H, py2)
-            
-            p_w = px2 - px1
-            p_h = py2 - py1
-            
-            if p_w < 20 or p_h < 20:
-                continue
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                log.info("  Selesai memproses video (EOF) atau kamera terputus.")
+                break
                 
-            # Potong (Crop) area person dari frame
-            person_crop = frame[py1:py2, px1:px2]
+            frame_count += 1
             
-            # Jalankan Deteksi Stage 2: Cek kelengkapan APD pada potongan person tersebut
-            results_ppe = model_ppe(person_crop, conf=CONFIG["conf_ppe"], verbose=False)
-            ppe_boxes = results_ppe[0].boxes
+            # Catat waktu mulai inferensi
+            t_inf_start = time.time()
             
-            person_has_violation = False
-            person_violations = []
+            # Salinan frame untuk anotasi visual
+            annotated_frame = frame.copy()
+            H, W, _ = frame.shape
             
-            # Loop setiap objek APD terdeteksi di dalam potongan person
-            for ppe_box in ppe_boxes:
-                cls_id = int(ppe_box.cls.cpu().numpy()[0])
-                cls_conf = float(ppe_box.conf.cpu().numpy()[0])
-                cx_c, cy_c, w_c, h_c = ppe_box.xywhn.cpu().numpy()[0] # normalized coords on crop
+            # Jalankan Deteksi Stage 1: Temukan Person (class 0 pada model COCO bawaan)
+            results_p = model_p(frame, classes=0, conf=CONFIG["conf_person"], verbose=False)
+            person_boxes = results_p[0].boxes.xyxy.cpu().numpy()
+            
+            total_people = len(person_boxes)
+            
+            # Koleksi pelanggaran yang terdeteksi di frame ini
+            frame_violations = []
+            
+            # Variabel ringkasan kepatuhan dan pelanggaran per individu untuk laporan
+            melanggar_count = 0
+            lengkap_count = 0
+            
+            no_helmet_count = 0
+            no_vest_count = 0
+            no_shoes_count = 0
+            
+            for p_idx, p_box in enumerate(person_boxes):
+                px1, py1, px2, py2 = map(int, p_box[:4])
                 
-                # Pemetaan kelas dan status kepatuhan
-                cls_name, is_compliant = ppe_classes.get(cls_id, ("unknown", True))
+                # Batasi koordinat agar berada dalam frame gambar
+                px1, py1 = max(0, px1), max(0, py1)
+                px2, py2 = min(W, px2), min(H, py2)
                 
-                # Peta koordinat bounding box kembali ke koordinat gambar penuh
-                px_c_abs = cx_c * p_w + px1
-                py_c_abs = cy_c * p_h + py1
-                pw_abs = w_c * p_w
-                ph_abs = h_c * p_h
+                p_w = px2 - px1
+                p_h = py2 - py1
                 
-                cx1 = int(px_c_abs - pw_abs/2)
-                cy1 = int(py_c_abs - ph_abs/2)
-                cx2 = int(px_c_abs + pw_abs/2)
-                cy2 = int(py_c_abs + ph_abs/2)
+                if p_w < 20 or p_h < 20:
+                    continue
+                    
+                # Potong (Crop) area person dari frame
+                person_crop = frame[py1:py2, px1:px2]
                 
-                # Warna bounding box objek APD
-                # Hijau untuk lengkap (helmet, vest, safety shoes)
-                # Merah untuk pelanggaran (no-helmet, no-vest, no-safety shoes)
-                color = (0, 255, 0) if is_compliant else (0, 0, 255)
+                # Jalankan Deteksi Stage 2: Cek kelengkapan APD pada potongan person tersebut
+                results_ppe = model_ppe(person_crop, conf=CONFIG["conf_ppe"], verbose=False)
+                ppe_boxes = results_ppe[0].boxes
                 
-                # Gambar bounding box atribut APD
-                cv2.rectangle(annotated_frame, (cx1, cy1), (cx2, cy2), color, 2)
+                person_has_violation = False
+                person_violations = []
+                y_shoes_bottom = None
+                
+                # Loop setiap objek APD terdeteksi di dalam potongan person
+                for ppe_box in ppe_boxes:
+                    cls_id = int(ppe_box.cls.cpu().numpy()[0])
+                    cls_conf = float(ppe_box.conf.cpu().numpy()[0])
+                    cx_c, cy_c, w_c, h_c = ppe_box.xywhn.cpu().numpy()[0] # normalized coords on crop
+                    
+                    # Pemetaan kelas dan status kepatuhan
+                    cls_name, is_compliant = ppe_classes.get(cls_id, ("unknown", True))
+                    
+                    # Peta koordinat bounding box kembali ke koordinat gambar penuh
+                    px_c_abs = cx_c * p_w + px1
+                    py_c_abs = cy_c * p_h + py1
+                    pw_abs = w_c * p_w
+                    ph_abs = h_c * p_h
+                    
+                    cx1 = int(px_c_abs - pw_abs/2)
+                    cy1 = int(py_c_abs - ph_abs/2)
+                    cx2 = int(px_c_abs + pw_abs/2)
+                    cy2 = int(py_c_abs + ph_abs/2)
+                    
+                    # Simpan koordinat Y terbawah untuk safety shoes
+                    if cls_name in ["safety shoes", "no-safety shoes", "safety-shoes", "no_safety-shoes"]:
+                        if y_shoes_bottom is None or cy2 > y_shoes_bottom:
+                            y_shoes_bottom = cy2
+                    
+                    # Warna bounding box objek APD
+                    color = (0, 255, 0) if is_compliant else (0, 0, 255)
+                    
+                    # Gambar bounding box atribut APD
+                    cv2.rectangle(annotated_frame, (cx1, cy1), (cx2, cy2), color, 2)
+                    cv2.putText(
+                        annotated_frame, f"{cls_name} {cls_conf:.2f}", (cx1, cy1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1
+                    )
+                    
+                    # Catat jika terdeteksi pelanggaran
+                    if not is_compliant:
+                        person_has_violation = True
+                        person_violations.append(cls_name)
+                        if cls_name not in frame_violations:
+                            frame_violations.append(cls_name)
+                            
+                        # Akumulasi jumlah pelanggar untuk laporan
+                        if cls_name == "no-helmet":
+                            no_helmet_count += 1
+                        elif cls_name == "no-vest":
+                            no_vest_count += 1
+                        elif cls_name == "no-safety shoes":
+                            no_shoes_count += 1
+                
+                # Jika sepatu tidak terdeteksi (occluded), gunakan bottom person bbox (py2) sebagai fallback
+                target_y_bottom = y_shoes_bottom if y_shoes_bottom is not None else py2
+                worker_distance = estimate_distance(target_y_bottom, H)
+                
+                # Klasifikasi kepatuhan pekerja
+                if person_has_violation:
+                    melanggar_count += 1
+                else:
+                    lengkap_count += 1
+                    
+                # Anotasi visual untuk Bounding Box Manusia (Stage 1)
+                p_color = (0, 0, 255) if person_has_violation else (0, 255, 0)
+                cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), p_color, 3)
+                
+                status_text = f"Pekerja #{p_idx+1} ({worker_distance}m): "
+                if person_has_violation:
+                    status_text += f"MELANGGAR ({', '.join(person_violations)})"
+                else:
+                    status_text += "LENGKAP"
+                    
                 cv2.putText(
-                    annotated_frame, f"{cls_name} {cls_conf:.2f}", (cx1, cy1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1
+                    annotated_frame, status_text, (px1, py1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, p_color, 2
+                )
+
+            # Catat akhir waktu inferensi
+            t_inf_end = time.time()
+            t_inf = t_inf_end - t_inf_start
+            
+            # Hitung waktu interval antar-frame
+            current_time = time.time()
+            t_frame_interval = current_time - prev_frame_time
+            prev_frame_time = current_time
+            
+            # Hitung FPS instan
+            fps_frame = 1.0 / t_frame_interval if t_frame_interval > 0 else 0.0
+            fps_inf = 1.0 / t_inf if t_inf > 0 else 0.0
+            
+            # Haluskan nilai FPS menggunakan Exponential Moving Average (EMA)
+            alpha = 0.1
+            if frame_count == 1:
+                current_fps_frame = fps_frame
+                current_fps_inf = fps_inf
+            else:
+                current_fps_frame = alpha * fps_frame + (1.0 - alpha) * current_fps_frame
+                current_fps_inf = alpha * fps_inf + (1.0 - alpha) * current_fps_inf
+                
+            # Log nilai FPS secara periodik (setiap 30 frame) agar log tidak penuh
+            if frame_count % 30 == 0:
+                log.info(f"  [Performance] FPS Frame: {current_fps_frame:.2f} | FPS Inferensi: {current_fps_inf:.2f}")
+
+            # ─────────────────────────────────────────────────────────────────────
+            # PROSES ALARM COOLDOWN & ROUND-ROBIN QUEUE
+            # ─────────────────────────────────────────────────────────────────────
+            current_time = time.time()
+            violations_to_alert = []
+            
+            for violation in frame_violations:
+                # Uji apakah waktu cooldown 10 detik sudah terlewati
+                if current_time - last_played[violation] >= CONFIG["cooldown_time"]:
+                    violations_to_alert.append(violation)
+                    # Tandai cooldown berjalan
+                    last_played[violation] = current_time
+                    
+            # Jika minimal ada 1 pelanggaran baru yang lolos filter cooldown, picu alarm!
+            if violations_to_alert:
+                log.info(f"  [Alarm!] Terdeteksi Pelanggaran Baru: {violations_to_alert}")
+                
+                # Buat teks pesan template Telegram Bot berformat HTML
+                waktu_str = datetime.now().strftime("%d %B %Y, %H:%M:%S") + " WIB"
+                
+                warning_text = (
+                    f"🚨 <b>ALARM PELANGGARAN APD</b> 🚨\n\n"
+                    f"📍 <b>Lokasi Kamera:</b> {CONFIG['lokasi_kamera']}\n"
+                    f"🕒 <b>Waktu:</b> {waktu_str}\n\n"
+                    f"📊 <b>Ringkasan Kepatuhan:</b>\n"
+                    f"👥 Total Pekerja: {total_people} Orang\n"
+                    f"✅ Pekerja lengkap: {lengkap_count} Orang\n"
+                    f"❌ Pekerja melanggar: {melanggar_count} Orang\n\n"
+                    f"⚠️ <b>Rincian Pelanggaran:</b>\n"
                 )
                 
-                # Catat jika terdeteksi pelanggaran
-                if not is_compliant:
-                    person_has_violation = True
-                    person_violations.append(cls_name)
-                    if cls_name not in frame_violations:
-                        frame_violations.append(cls_name)
-                        
-                    # Akumulasi jumlah pelanggar untuk laporan
-                    if cls_name == "no-helmet":
-                        no_helmet_count += 1
-                    elif cls_name == "no-vest":
-                        no_vest_count += 1
-                    elif cls_name == "no-safety shoes":
-                        no_shoes_count += 1
-            
-            # Klasifikasi kepatuhan pekerja
-            if person_has_violation:
-                melanggar_count += 1
-            else:
-                lengkap_count += 1
+                if no_helmet_count > 0:
+                    warning_text += f"• {no_helmet_count} Orang : Tidak menggunakan Helm (no-helmet)\n"
+                if no_vest_count > 0:
+                    warning_text += f"• {no_vest_count} Orang : Tidak menggunakan Rompi (no-vest)\n"
+                if no_shoes_count > 0:
+                    warning_text += f"• {no_shoes_count} Orang : Tidak menggunakan Sepatu Safety (no-safety shoes)\n"
+                    
+                warning_text += f"\nMohon petugas HSE segera mengecek lokasi terkait."
                 
-            # Anotasi visual untuk Bounding Box Manusia (Stage 1)
-            # Merah: Pekerja melanggar aturan APD
-            # Hijau: Pekerja patuh APD lengkap (tidak ada no-helmet / no-vest / no-shoes)
-            p_color = (0, 0, 255) if person_has_violation else (0, 255, 0)
-            cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), p_color, 3)
-            
-            status_text = f"Pekerja #{p_idx+1}: "
-            if person_has_violation:
-                status_text += f"MELANGGAR ({', '.join(person_violations)})"
-            else:
-                status_text += "LENGKAP"
-                
+                # Masukkan ke queue agar diproses thread latar belakang (Telegram & Audio bergantian)
+                # Mengirimkan frame teranotasi sebagai visual bukti pelanggaran
+                warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy()))
+
+            # Ambil metrik resource sistem secara real-time
+            cpu_pct, gpu_pct, ram_pct = get_system_metrics()
+
+            # Tampilkan visual deteksi
             cv2.putText(
-                annotated_frame, status_text, (px1, py1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, p_color, 2
+                annotated_frame, f"Lokasi: {CONFIG['lokasi_kamera']}", (15, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
             )
-
-        # ─────────────────────────────────────────────────────────────────────
-        # PROSES ALARM COOLDOWN & ROUND-ROBIN QUEUE
-        # ─────────────────────────────────────────────────────────────────────
-        current_time = time.time()
-        violations_to_alert = []
-        
-        for violation in frame_violations:
-            # Uji apakah waktu cooldown 10 detik sudah terlewati
-            if current_time - last_played[violation] >= CONFIG["cooldown_time"]:
-                violations_to_alert.append(violation)
-                # Tandai cooldown berjalan
-                last_played[violation] = current_time
-                
-        # Jika minimal ada 1 pelanggaran baru yang lolos filter cooldown, picu alarm!
-        if violations_to_alert:
-            log.info(f"  [Alarm!] Terdeteksi Pelanggaran Baru: {violations_to_alert}")
-            
-            # Buat teks pesan template Telegram Bot berformat HTML
-            waktu_str = datetime.now().strftime("%d %B %Y, %H:%M:%S") + " WIB"
-            
-            warning_text = (
-                f"🚨 <b>ALARM PELANGGARAN APD</b> 🚨\n\n"
-                f"📍 <b>Lokasi Kamera:</b> {CONFIG['lokasi_kamera']}\n"
-                f"🕒 <b>Waktu:</b> {waktu_str}\n\n"
-                f"📊 <b>Ringkasan Kepatuhan:</b>\n"
-                f"👥 Total Pekerja: {total_people} Orang\n"
-                f"✅ Pekerja lengkap: {lengkap_count} Orang\n"
-                f"❌ Pekerja melanggar: {melanggar_count} Orang\n\n"
-                f"⚠️ <b>Rincian Pelanggaran:</b>\n"
+            cv2.putText(
+                annotated_frame, f"Total Pekerja: {total_people}", (15, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+            )
+            cv2.putText(
+                annotated_frame, f"FPS Frame: {current_fps_frame:.1f} | FPS Inf: {current_fps_inf:.1f}", (15, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2
+            )
+            cv2.putText(
+                annotated_frame, f"CPU: {cpu_pct:.1f}% | GPU: {gpu_pct:.1f}% | RAM: {ram_pct:.1f}%", (15, 120),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
             )
             
-            if no_helmet_count > 0:
-                warning_text += f"• {no_helmet_count} Orang : Tidak menggunakan Helm (no-helmet)\n"
-            if no_vest_count > 0:
-                warning_text += f"• {no_vest_count} Orang : Tidak menggunakan Rompi (no-vest)\n"
-            if no_shoes_count > 0:
-                warning_text += f"• {no_shoes_count} Orang : Tidak menggunakan Sepatu Safety (no-safety shoes)\n"
-                
-            warning_text += f"\nMohon petugas HSE segera mengecek lokasi terkait."
+            cv2.imshow("PROTMIND APD Detection - Edge Device", annotated_frame)
             
-            # Masukkan ke queue agar diproses thread latar belakang (Telegram & Audio bergantian)
-            # Mengirimkan frame teranotasi sebagai visual bukti pelanggaran
-            warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy()))
-
-        # Tampilkan visual deteksi
-        cv2.putText(
-            annotated_frame, f"Lokasi: {CONFIG['lokasi_kamera']}", (15, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-        )
-        cv2.putText(
-            annotated_frame, f"Total Pekerja: {total_people}", (15, 60),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-        )
+            # Keluar jika menekan tombol 'Q'
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                log.info("  Keluar atas permintaan pengguna.")
+                break
+    except KeyboardInterrupt:
+        log.info("  Program dihentikan oleh pengguna (Ctrl+C).")
+    finally:
+        # Cleanup
+        exit_event.set()
+        cap.release()
+        cv2.destroyAllWindows()
         
-        cv2.imshow("PROTMIND APD Detection - Edge Device", annotated_frame)
-        
-        # Keluar jika menekan tombol 'Q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            log.info("  Keluar atas permintaan pengguna.")
-            break
-            
-    # Cleanup
-    cap.release()
-    cv2.destroyAllWindows()
-    
-    # Hentikan worker thread
-    warning_queue.put(None)
-    worker_thread.join()
-    log.info("  Sistem dimatikan dengan sukses.")
+        # Hentikan worker thread
+        try:
+            warning_queue.put(None)
+        except Exception:
+            pass
+        worker_thread.join(timeout=1.0)
+        log.info("  Sistem dimatikan dengan sukses.")
 
 if __name__ == "__main__":
     main()
