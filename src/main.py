@@ -331,8 +331,9 @@ def main():
     parser = argparse.ArgumentParser(description="PROTMIND APD System — Inference Engine")
     parser.add_argument("--source", type=str, default=None, help="Sumber kamera/video (indeks angka atau path video file).")
     parser.add_argument("--list-cameras", action="store_true", help="Menampilkan daftar indeks kamera USB yang tersedia di laptop.")
-    parser.add_argument("--conf-person", type=float, default=None, help="Confidence threshold untuk model Person (default: 0.40).")
-    parser.add_argument("--conf-ppe", type=float, default=None, help="Confidence threshold untuk model PPE (default: 0.40).")
+    parser.add_argument("--conf-person", type=float, default=None, help="Confidence threshold untuk model Person (default: 0.50).")
+    parser.add_argument("--conf-ppe", type=float, default=None, help="Confidence threshold untuk model PPE (default: 0.50).")
+    parser.add_argument("--headless", action="store_true", help="Jalankan inferensi tanpa menampilkan window GUI (cv2.imshow).")
     args = parser.parse_args()
 
     if args.list_cameras:
@@ -357,6 +358,10 @@ def main():
     if args.conf_ppe is not None:
         CONFIG["conf_ppe"] = args.conf_ppe
         log.info(f"  [CLI Override] Conf PPE diatur ke: {args.conf_ppe}")
+
+    if args.headless:
+        CONFIG["headless"] = True
+        log.info("  [CLI Override] Mode Headless diaktifkan (GUI Window dinonaktifkan).")
 
     # Load Models
     log.info("=" * 60)
@@ -647,12 +652,16 @@ def main():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
             )
             
-            cv2.imshow("PROTMIND APD Detection - Edge Device", annotated_frame)
-            
-            # Keluar jika menekan tombol 'Q'
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                log.info("  Keluar atas permintaan pengguna.")
-                break
+            if not CONFIG.get("headless", False):
+                cv2.imshow("PROTMIND APD Detection - Edge Device", annotated_frame)
+                
+                # Keluar jika menekan tombol 'Q'
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    log.info("  Keluar atas permintaan pengguna.")
+                    break
+            else:
+                # Mode headless: berikan jeda pendek non-blocking agar CPU tidak pinned 100%
+                cv2.waitKey(1)
     except KeyboardInterrupt:
         log.info("  Program dihentikan oleh pengguna (Ctrl+C).")
     finally:
