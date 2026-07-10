@@ -86,37 +86,45 @@ log = logging.getLogger("PROTMIND-MAIN")
 # ─────────────────────────────────────────────────────────────────────────────
 # FUNGSI PENDUKUNG ESTIMASI JARAK & METRIK SISTEM & KOMBINASI AUDIO
 # ─────────────────────────────────────────────────────────────────────────────
-def estimate_distance(y_bottom: float, frame_height: float) -> float:
+def estimate_distance(px1: int, py1: int, px2: int, py2: int, frame_width: float, frame_height: float) -> float:
     """
-    Menghitung jarak monokular ke pekerja menggunakan rumus trigonometri.
-    Asumsi kamera dipasang horizontal / tegak lurus (tilt = 0.0 derajat).
+    Mengestimasi jarak monokular ke pekerja secara dinamis:
+    - Jika pekerja terpotong bingkai atas/bawah (sangat dekat), gunakan lebar bahu (width-based).
+    - Jika pekerja terlihat utuh di dalam bingkai, gunakan tinggi badan (height-based).
     """
     try:
-        h_c = float(CONFIG.get("camera_height", 1.0))
-        tilt = float(CONFIG.get("camera_tilt", 0.0))
-        vfov = float(CONFIG.get("camera_vfov", 48.0))
-        
-        if frame_height <= 0:
+        if frame_width <= 0 or frame_height <= 0:
             return 0.0
             
-        # Normalisasi Y bottom relative ke center: -1.0 di atas, 0.0 di tengah, 1.0 di bawah
-        y_norm = (y_bottom - frame_height / 2.0) / (frame_height / 2.0)
+        p_w = px2 - px1
+        p_h = py2 - py1
         
-        # Sudut depresi (offset dari optical axis horizontal)
-        angle_offset = y_norm * (vfov / 2.0)
+        if p_w <= 0 or p_h <= 0:
+            return 0.0
+
+        # Parameter fisik rata-rata manusia
+        h_actual = 1.7   # Tinggi rata-rata (meter)
+        w_actual = 0.45  # Lebar bahu rata-rata (meter)
         
-        # Total sudut depresi dari horizontal
-        total_angle = tilt + angle_offset
+        # Spesifikasi FOV kamera (default: HFOV 60, VFOV 48)
+        hfov = 60.0
+        vfov = float(CONFIG.get("camera_vfov", 48.0))
         
-        # Batasi agar sudut tetap logis untuk mencegah pembagian dengan nilai ekstrem
-        if total_angle <= 0.5:
-            total_angle = 0.5
+        # Cek apakah bounding box menyentuh batas atas atau bawah frame (indikasi terpotong karena dekat)
+        # Berikan margin toleransi 5 piksel
+        is_cut_off = (py1 <= 5) or (py2 >= frame_height - 5)
+        
+        if is_cut_off:
+            # Gunakan estimasi berbasis LEBAR (width-based)
+            hfov_rad = np.radians(hfov)
+            focal_length_hx = frame_width / (2.0 * np.tan(hfov_rad / 2.0))
+            distance = (focal_length_hx * w_actual) / p_w
+        else:
+            # Gunakan estimasi berbasis TINGGI (height-based)
+            vfov_rad = np.radians(vfov)
+            focal_length_px = frame_height / (2.0 * np.tan(vfov_rad / 2.0))
+            distance = (focal_length_px * h_actual) / p_h
             
-        total_angle_rad = np.radians(total_angle)
-        
-        # Trigonometri: Jarak = Tinggi Kamera / tan(Sudut)
-        distance = h_c / np.tan(total_angle_rad)
-        
         return round(distance, 2)
     except Exception as e:
         log.error(f"  [Distance] Gagal mengestimasi jarak: {e}")
@@ -538,7 +546,7 @@ def main():
                 
                 # Jika sepatu tidak terdeteksi (occluded), gunakan bottom person bbox (py2) sebagai fallback
                 target_y_bottom = y_shoes_bottom if y_shoes_bottom is not None else py2
-                worker_distance = estimate_distance(target_y_bottom, H)
+                worker_distance = estimate_distance(px1, py1, px2, py2, W, H)
                 
                 # Klasifikasi kepatuhan pekerja
                 if person_has_violation:
