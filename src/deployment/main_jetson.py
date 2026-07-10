@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 =============================================================================
 PROTMIND — main_jetson.py
@@ -146,7 +145,7 @@ def estimate_distance(px1: int, py1: int, px2: int, py2: int, frame_width: float
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM METRICS
 # ─────────────────────────────────────────────────────────────────────────────
-def get_system_metrics() -> tuple[float, float, float]:
+def get_system_metrics():
     import psutil
     cpu_usage = psutil.cpu_percent()
     ram_usage = psutil.virtual_memory().percent
@@ -172,7 +171,7 @@ def get_system_metrics() -> tuple[float, float, float]:
 warning_queue = queue.Queue()
 exit_event = threading.Event()
 
-def get_combination_audio(violations: list) -> str | None:
+def get_combination_audio(violations):
     has_helmet = "no-helmet" in violations
     has_vest = "no-vest" in violations
     has_shoes = "no-safety shoes" in violations

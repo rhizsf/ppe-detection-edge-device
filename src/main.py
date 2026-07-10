@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 =============================================================================
 PROTMIND — main.py
@@ -132,7 +131,7 @@ def estimate_distance(px1: int, py1: int, px2: int, py2: int, frame_width: float
         return 0.0
 
 
-def get_system_metrics() -> tuple[float, float, float]:
+def get_system_metrics():
     """
     Mendapatkan pemakaian CPU, GPU, dan RAM secara real-time.
     Mendukung NVIDIA Jetson Nano dan PC standar.
@@ -165,7 +164,7 @@ def get_system_metrics() -> tuple[float, float, float]:
     return cpu_usage, gpu_usage, ram_usage
 
 
-def get_combination_audio(violations: list) -> str | None:
+def get_combination_audio(violations):
     """
     Memetakan list pelanggaran APD ke berkas audio .wav kombinasi terintegrasi (8 variasi).
     """
