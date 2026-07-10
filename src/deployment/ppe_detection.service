@@ -1,0 +1,14 @@
+[Unit]
+Description=Protmind Real-Time APD Edge Detection Service
+After=network.target
+
+[Service]
+Type=simple
+User=jetson
+WorkingDirectory=/home/jetson/ppe-detection-edge-device
+ExecStart=/home/jetson/ppe-detection-edge-device/venv/bin/python src/main.py --source 0 --headless
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
