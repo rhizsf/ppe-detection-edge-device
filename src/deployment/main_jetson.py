@@ -493,8 +493,14 @@ def main():
                 current_fps_frame = alpha * fps_frame + (1.0 - alpha) * current_fps_frame
                 current_fps_inf = alpha * fps_inf + (1.0 - alpha) * current_fps_inf
                 
+            # Ambil metrik resource sistem
+            cpu_pct, gpu_pct, ram_pct = get_system_metrics()
+            
             if frame_count % 30 == 0:
-                log.info(f"  [Jetson Perf] FPS Frame: {current_fps_frame:.2f} | FPS Inferensi: {current_fps_inf:.2f}")
+                log.info(
+                    f"  [Jetson Perf] FPS Frame: {current_fps_frame:.2f} | FPS Inf: {current_fps_inf:.2f} | "
+                    f"CPU: {cpu_pct:.1f}% | GPU: {gpu_pct:.1f}% | RAM: {ram_pct:.1f}%"
+                )
 
             # ─────────────────────────────────────────────────────────────────────
             # ALARM MANAGER (Hanya dipicu saat inferensi baru dijalankan)
@@ -533,8 +539,7 @@ def main():
                     warning_text += f"\nSegera lakukan inspeksi visual di lokasi konstruksi."
                     warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy()))
 
-            # Ambil metrik resource sistem
-            cpu_pct, gpu_pct, ram_pct = get_system_metrics()
+
 
             # Render overlay teks visual
             cv2.putText(annotated_frame, f"Lokasi: {CONFIG['lokasi_kamera']}", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)

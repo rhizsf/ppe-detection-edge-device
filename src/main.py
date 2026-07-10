@@ -598,9 +598,15 @@ def main():
                 current_fps_frame = alpha * fps_frame + (1.0 - alpha) * current_fps_frame
                 current_fps_inf = alpha * fps_inf + (1.0 - alpha) * current_fps_inf
                 
+            # Ambil metrik resource sistem secara real-time
+            cpu_pct, gpu_pct, ram_pct = get_system_metrics()
+            
             # Log nilai FPS secara periodik (setiap 30 frame) agar log tidak penuh
             if frame_count % 30 == 0:
-                log.info(f"  [Performance] FPS Frame: {current_fps_frame:.2f} | FPS Inferensi: {current_fps_inf:.2f}")
+                log.info(
+                    f"  [Performance] FPS Frame: {current_fps_frame:.2f} | FPS Inferensi: {current_fps_inf:.2f} | "
+                    f"CPU: {cpu_pct:.1f}% | GPU: {gpu_pct:.1f}% | RAM: {ram_pct:.1f}%"
+                )
 
             # ─────────────────────────────────────────────────────────────────────
             # PROSES ALARM COOLDOWN & ROUND-ROBIN QUEUE
@@ -646,8 +652,7 @@ def main():
                 # Mengirimkan frame teranotasi sebagai visual bukti pelanggaran
                 warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy()))
 
-            # Ambil metrik resource sistem secara real-time
-            cpu_pct, gpu_pct, ram_pct = get_system_metrics()
+
 
             # Tampilkan visual deteksi
             cv2.putText(
