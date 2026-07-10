@@ -42,9 +42,9 @@ CONFIG = {
     "camera_source"     : int(os.getenv("CAMERA_SOURCE", "0")) if os.getenv("CAMERA_SOURCE", "0").isdigit() else os.getenv("CAMERA_SOURCE", "0"),
     "lokasi_kamera"     : os.getenv("LOKASI_KAMERA", "Gate 1 - Jetson Nano Test"),
 
-    # Fallback model otomatis (memprioritaskan TensorRT .engine dibanding PyTorch .pt)
-    "model_person"      : "models/best_person.engine" if Path("models/best_person.engine").exists() else ("models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt"),
-    "model_ppe"         : "models/best_ppe.engine" if Path("models/best_ppe.engine").exists() else ("models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260710_022641.pt"),
+    # Fallback model otomatis (memprioritaskan TensorRT .engine dibanding PyTorch .pt hanya jika CUDA tersedia)
+    "model_person"      : "models/best_person.engine" if (Path("models/best_person.engine").exists() and torch.cuda.is_available()) else ("models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt"),
+    "model_ppe"         : "models/best_ppe.engine" if (Path("models/best_ppe.engine").exists() and torch.cuda.is_available()) else ("models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260710_022641.pt"),
 
     "conf_person"       : 0.50,
     "conf_ppe"          : 0.50,
