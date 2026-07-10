@@ -29,8 +29,14 @@ load_dotenv()
 # Bersihkan cache VRAM GPU pada startup untuk arsitektur RAM bersama Jetson Nano
 gc.collect()
 if torch.cuda.is_available():
-    torch.cuda.empty_cache()
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    try:
+        torch.cuda.empty_cache()
+        # 'expandable_segments' hanya didukung di PyTorch >= 2.0
+        torch_ver = torch.__version__.split('.')
+        if len(torch_ver) > 0 and torch_ver[0].isdigit() and int(torch_ver[0]) >= 2:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
