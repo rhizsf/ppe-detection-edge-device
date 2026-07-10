@@ -314,18 +314,26 @@ def main():
         )
         log.info(f"  [Camera] Mengaktifkan Jetson CSI Camera GStreamer Pipeline: {gstreamer_pipeline}")
         cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
-    elif platform.system() == "Linux" and isinstance(source, int):
-        # Pipeline optimal untuk kamera USB di Jetson Nano Linux
-        gstreamer_pipeline = (
-            f"v4l2src device=/dev/video{source} ! "
-            "video/x-raw, width=640, height=480, format=YUY2, framerate=30/1 ! "
-            "videoconvert ! video/x-raw, format=BGR ! appsink drop=true sync=false"
-        )
-        log.info(f"  [Camera] Mengaktifkan USB GStreamer Pipeline: {gstreamer_pipeline}")
-        cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
     else:
-        log.info(f"  [Camera] Menggunakan OpenCV standard backend untuk source: {source}")
-        cap = cv2.VideoCapture(source)
+        opened = False
+        if platform.system() == "Linux" and isinstance(source, int):
+            try:
+                # Pipeline optimal untuk kamera USB di Jetson Nano Linux
+                gstreamer_pipeline = (
+                    f"v4l2src device=/dev/video{source} ! "
+                    "video/x-raw, width=640, height=480, format=YUY2, framerate=30/1 ! "
+                    "videoconvert ! video/x-raw, format=BGR ! appsink drop=true sync=false"
+                )
+                log.info(f"  [Camera] Mencoba USB GStreamer Pipeline: {gstreamer_pipeline}")
+                cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+                if cap.isOpened():
+                    opened = True
+            except Exception:
+                pass
+                
+        if not opened:
+            log.info(f"  [Camera] Menggunakan OpenCV standard backend untuk source: {source}")
+            cap = cv2.VideoCapture(source)
 
     if not cap.isOpened():
         log.error(f"  Gagal membuka kamera / video source: {source}")

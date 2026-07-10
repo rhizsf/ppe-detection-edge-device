@@ -410,17 +410,23 @@ def main():
     # Buka source kamera/video
     source = CONFIG["camera_source"]
     
-    # Gunakan GStreamer pipeline jika berjalan di Linux dan source adalah integer (kamera USB)
+    opened = False
     if platform.system() == "Linux" and isinstance(source, int):
-        # Gunakan v4l2src GStreamer pipeline untuk hardware-accelerated BGR decoding
-        gstreamer_pipeline = (
-            f"v4l2src device=/dev/video{source} ! "
-            "video/x-raw, width=640, height=480, format=YUY2, framerate=30/1 ! "
-            "videoconvert ! video/x-raw, format=BGR ! appsink drop=true sync=false"
-        )
-        log.info(f"  [Camera] Menggunakan GStreamer pipeline: {gstreamer_pipeline}")
-        cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
-    else:
+        try:
+            # Gunakan v4l2src GStreamer pipeline untuk hardware-accelerated BGR decoding
+            gstreamer_pipeline = (
+                f"v4l2src device=/dev/video{source} ! "
+                "video/x-raw, width=640, height=480, format=YUY2, framerate=30/1 ! "
+                "videoconvert ! video/x-raw, format=BGR ! appsink drop=true sync=false"
+            )
+            log.info(f"  [Camera] Mencoba GStreamer pipeline: {gstreamer_pipeline}")
+            cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                opened = True
+        except Exception:
+            pass
+            
+    if not opened:
         log.info(f"  [Camera] Menggunakan OpenCV standard backend untuk source: {source}")
         cap = cv2.VideoCapture(source)
         
