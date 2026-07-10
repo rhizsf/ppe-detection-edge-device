@@ -27,16 +27,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Bersihkan cache VRAM GPU pada startup untuk arsitektur RAM bersama Jetson Nano
-gc.collect()
-if torch.cuda.is_available():
-    try:
+try:
+    gc.collect()
+    if torch.cuda.is_available():
         torch.cuda.empty_cache()
         # 'expandable_segments' hanya didukung di PyTorch >= 2.0
         torch_ver = torch.__version__.split('.')
         if len(torch_ver) > 0 and torch_ver[0].isdigit() and int(torch_ver[0]) >= 2:
             os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    except Exception:
-        pass
+except Exception:
+    pass
+
+# Tentukan model secara dinamis berdasarkan versi Python
+is_python_36 = sys.version_info < (3, 7)
+if is_python_36:
+    # Pada Python 3.6, model .pt baru tidak bisa dibaca karena perbedaan struktur modul (Pickle error).
+    # Prioritaskan format .onnx karena kompatibel secara universal tanpa pickle.
+    model_person_path = "models/best_person.onnx" if Path("models/best_person.onnx").exists() else "models/best_person.pt"
+    model_ppe_path = "models/best_ppe.onnx" if Path("models/best_ppe.onnx").exists() else "models/best_ppe.pt"
+else:
+    # Pada Python 3.8+, prioritaskan .engine jika CUDA aktif, lalu .pt
+    model_person_path = "models/best_person.engine" if (Path("models/best_person.engine").exists() and torch.cuda.is_available()) else ("models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt")
+    model_ppe_path = "models/best_ppe.engine" if (Path("models/best_ppe.engine").exists() and torch.cuda.is_available()) else ("models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260710_022641.pt")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -47,9 +59,8 @@ CONFIG = {
     "camera_source"     : int(os.getenv("CAMERA_SOURCE", "0")) if os.getenv("CAMERA_SOURCE", "0").isdigit() else os.getenv("CAMERA_SOURCE", "0"),
     "lokasi_kamera"     : os.getenv("LOKASI_KAMERA", "Gate 1 - Jetson Nano Test"),
 
-    # Fallback model otomatis (memprioritaskan TensorRT .engine dibanding PyTorch .pt hanya jika CUDA tersedia)
-    "model_person"      : "models/best_person.engine" if (Path("models/best_person.engine").exists() and torch.cuda.is_available()) else ("models/best_person.pt" if Path("models/best_person.pt").exists() else "yolov8n.pt"),
-    "model_ppe"         : "models/best_ppe.engine" if (Path("models/best_ppe.engine").exists() and torch.cuda.is_available()) else ("models/best_ppe.pt" if Path("models/best_ppe.pt").exists() else "models/best_ppe_20260710_022641.pt"),
+    "model_person"      : model_person_path,
+    "model_ppe"         : model_ppe_path,
 
     "conf_person"       : 0.50,
     "conf_ppe"          : 0.50,
