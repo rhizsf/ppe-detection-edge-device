@@ -288,19 +288,54 @@ log = logging.getLogger("PROTMIND-JETSON")
 # DETEKSI KARTU SUARA USB (LINUX ALSA)
 # ─────────────────────────────────────────────────────────────────────────────
 def find_usb_audio_card():
-    """Mencari index kartu suara USB dari /proc/asound/cards."""
+    """Mencari index kartu suara USB terbaik dari /proc/asound/cards."""
     cards_file = Path("/proc/asound/cards")
     if not cards_file.exists():
         return None
     try:
         with open(cards_file, "r") as f:
-            lines = f.readlines()
-        for line in lines:
-            # Cari kata kunci USB Audio, USB, Audio, atau Essager
-            if any(k in line.lower() for k in ["usb", "audio", "essager"]):
-                parts = line.split()
-                if parts and parts[0].strip().isdigit():
-                    return int(parts[0].strip())
+            content = f.read()
+
+        cards = {}
+        current_card_idx = None
+
+        for line in content.splitlines():
+            parts = line.strip().split()
+            if not parts:
+                continue
+            # Jika diawali angka indeks (ALSA format), inisialisasi kartu baru
+            if parts[0].isdigit():
+                current_card_idx = int(parts[0])
+                cards[current_card_idx] = line.lower()
+            elif current_card_idx is not None:
+                # Gabungkan deskripsi baris berikutnya ke kartu suara aktif
+                cards[current_card_idx] += " " + line.lower()
+
+        best_card_idx = None
+        best_score = -9999
+
+        for card_idx, info in cards.items():
+            score = 0
+            if "usb audio" in info:
+                score += 100
+            if "ab13x" in info:
+                score += 100
+            if "essager" in info:
+                score += 100
+            if "generic" in info:
+                score += 50
+            if "usb-audio" in info or "usb" in info or "audio" in info:
+                score += 10
+
+            # Berikan penalti berat jika perangkat merupakan webcam/mic kamera (seperti JETE-W7)
+            if any(k in info for k in ["jete", "camera", "webcam", "mic", "microphone"]):
+                score -= 150
+
+            if score > best_score and score > 0:
+                best_score = score
+                best_card_idx = card_idx
+
+        return best_card_idx
     except Exception:
         pass
     return None
