@@ -9,8 +9,8 @@ def create_inference_notebook():
        "cell_type": "markdown",
        "metadata": {},
        "source": [
-        "# LAPORAN TUGAS AKHIR: PENGUJIAN INFERENSI EDGE AI & HASIL DEPLOYMENT JETSON NANO\n",
-        "**Sistem Deteksi Kepatuhan Alat Pelindung Diri (APD) Real-Time Berbasis Deep Learning pada Perangkat Edge NVIDIA Jetson Nano**\n",
+        "# LAPORAN TUGAS AKHIR: SISTEM DETEKSI DAN PERINGATAN PELANGGARAN ALAT PELINDUNG DIRI MENGGUNAKAN EDGE DEVICE BERBASIS YOLO DALAM KAWASAN KONSTRUKSI\n",
+        "**Fokus Bahasan: Pengujian Inferensi Edge AI & Hasil Deployment pada NVIDIA Jetson Nano**\n",
         "\n",
         "---\n",
         "\n",
@@ -222,8 +222,8 @@ def create_training_notebook():
        "cell_type": "markdown",
        "metadata": {},
        "source": [
-        "# LAPORAN TUGAS AKHIR: PROSES PRAPEMROSESAN & PELATIHAN MODEL DETEKSI APD\n",
-        "**Pengembangan Model Deep Learning Dua-Tahap untuk Deteksi Kepatuhan APD Pekerja Konstruksi**\n",
+        "# LAPORAN TUGAS AKHIR: SISTEM DETEKSI DAN PERINGATAN PELANGGARAN ALAT PELINDUNG DIRI MENGGUNAKAN EDGE DEVICE BERBASIS YOLO DALAM KAWASAN KONSTRUKSI\n",
+        "**Fokus Bahasan: Proses Prapemrosesan Dataset & Pelatihan Model Deteksi APD Pekerja**\n",
         "\n",
         "---\n",
         "\n",
