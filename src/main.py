@@ -367,7 +367,20 @@ def main():
     parser.add_argument("--conf-person", type=float, default=None, help="Confidence threshold untuk model Person (default: 0.50).")
     parser.add_argument("--conf-ppe", type=float, default=None, help="Confidence threshold untuk model PPE (default: 0.50).")
     parser.add_argument("--headless", action="store_true", help="Jalankan inferensi tanpa menampilkan window GUI (cv2.imshow).")
+    parser.add_argument("--test-audio", action="store_true", help="Uji coba pemutaran audio pada kartu suara USB.")
     args = parser.parse_args()
+
+    if args.test_audio:
+        log.info("=" * 60)
+        log.info("  PROTMIND APD SYSTEM — UJI COBA AUDIO SPEAKER")
+        log.info("=" * 60)
+        test_file = CONFIG["audio_helm"]
+        log.info(f"Mencoba memutar audio tes: {test_file}")
+        play_audio(test_file)
+        # Tunggu beberapa detik agar aplay (asinkron) selesai memutar suara sebelum program exit
+        time.sleep(5)
+        log.info("Uji coba audio selesai.")
+        sys.exit(0)
 
     if args.list_cameras:
         list_available_cameras()
