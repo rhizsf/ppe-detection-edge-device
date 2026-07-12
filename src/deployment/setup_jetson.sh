@@ -45,11 +45,11 @@ else
 fi
 
 # Cetak info versi python yang aktif
-echo -e "Menggunakan Python: $(python3 --version) di ($PYTHON_EXEC)"
+echo -e "Menggunakan Python: $($PYTHON_EXEC --version) di ($PYTHON_EXEC)"
 
 # 3. Verifikasi instalasi PyTorch Jetson Nano (sangat penting untuk akselerasi GPU)
 echo -e "${GREEN}[1/5] Memverifikasi instalasi PyTorch & CUDA...${NC}"
-python3 -c "
+$PYTHON_EXEC -c "
 import torch
 print('  -> PyTorch Version:', torch.__version__)
 print('  -> CUDA Available :', torch.cuda.is_available())
@@ -61,29 +61,53 @@ else:
 
 # 4. Pasang dependensi tambahan tanpa merusak PyTorch Jetson kustom
 echo -e "${GREEN}[2/5] Menginstal dependensi tambahan...${NC}"
-pip install --upgrade pip
+$PYTHON_EXEC -m pip install --upgrade pip
 # Ultralytics dipasang. Pip akan mendeteksi jika torch sudah ada dan tidak akan mendownload ulang.
-pip install -r requirements.txt
+$PYTHON_EXEC -m pip install -r requirements.txt
 
 # 5. Konversi model PyTorch (.pt) ke TensorRT (.engine) untuk akselerasi GPU Jetson
+TRTEXEC="/usr/src/tensorrt/bin/trtexec"
 echo -e "${GREEN}[3/5] Mengonversi model kustom ke TensorRT (FP16)...${NC}"
+
+# Mengekspor Stage 1 (Person)
 if [ -f "models/best_person.pt" ]; then
     echo "Mengekspor model Person (Stage 1)..."
-    python3 -c "from ultralytics import YOLO; YOLO('models/best_person.pt').export(format='engine', half=True, device=0)"
+    # Ekspor ke ONNX menggunakan Python virtual environment (untuk menghindari Pickle error di Python 3.6)
+    $PYTHON_EXEC -c "from ultralytics import YOLO; YOLO('models/best_person.pt').export(format='onnx', device='cpu')"
+    
+    if [ -f "$TRTEXEC" ] && [ -f "models/best_person.onnx" ]; then
+        echo "Mengompilasi ONNX ke TensorRT Engine..."
+        $TRTEXEC --onnx=models/best_person.onnx --saveEngine=models/best_person.engine --fp16
+    fi
 else
     echo -e "${YELLOW}Info: models/best_person.pt tidak ditemukan. Ekspor dilewati.${NC}"
 fi
 
+# Mengekspor Stage 2 (PPE)
+TARGET_PPE_PT=""
 if [ -f "models/best_ppe.pt" ]; then
-    echo "Mengekspor model APD (Stage 2)..."
-    python3 -c "from ultralytics import YOLO; YOLO('models/best_ppe.pt').export(format='engine', half=True, device=0)"
+    TARGET_PPE_PT="models/best_ppe.pt"
 elif [ -f "models/best_ppe_20260710_022641.pt" ]; then
-    echo "Mengekspor model APD (Model 20260710_022641)..."
-    python3 -c "from ultralytics import YOLO; YOLO('models/best_ppe_20260710_022641.pt').export(format='engine', half=True, device=0)"
-    # Buat link simbolik ke best_ppe.pt agar runtime memuatnya secara default
+    TARGET_PPE_PT="models/best_ppe_20260710_022641.pt"
     ln -sf best_ppe_20260710_022641.pt models/best_ppe.pt
-    if [ -f "models/best_ppe_20260710_022641.engine" ]; then
-        ln -sf best_ppe_20260710_022641.engine models/best_ppe.engine
+fi
+
+if [ -n "$TARGET_PPE_PT" ]; then
+    echo "Mengekspor model APD ($TARGET_PPE_PT)..."
+    # Ekspor ke ONNX menggunakan Python virtual environment
+    $PYTHON_EXEC -c "from ultralytics import YOLO; YOLO('$TARGET_PPE_PT').export(format='onnx', device='cpu')"
+    
+    # Dapatkan nama berkas onnx
+    PPE_ONNX="${TARGET_PPE_PT%.pt}.onnx"
+    PPE_ENGINE="${TARGET_PPE_PT%.pt}.engine"
+    
+    if [ -f "$TRTEXEC" ] && [ -f "$PPE_ONNX" ]; then
+        echo "Mengompilasi ONNX ke TensorRT Engine..."
+        $TRTEXEC --onnx="$PPE_ONNX" --saveEngine="$PPE_ENGINE" --fp16
+        
+        if [ "$TARGET_PPE_PT" = "models/best_ppe_20260710_022641.pt" ]; then
+            ln -sf best_ppe_20260710_022641.engine models/best_ppe.engine
+        fi
     fi
 else
     echo -e "${YELLOW}Info: Berkas model APD (.pt) tidak ditemukan. Ekspor dilewati.${NC}"
@@ -100,7 +124,8 @@ After=network.target
 Type=simple
 User=$CURRENT_USER
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PYTHON_EXEC src/main.py --source 0 --headless
+Environment="LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1"
+ExecStart=/usr/bin/python3.6 src/deployment/main_jetson.py --source 0 --headless --skip-frames 2
 Restart=on-failure
 RestartSec=5
 

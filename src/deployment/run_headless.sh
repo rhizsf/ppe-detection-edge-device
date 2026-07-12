@@ -25,5 +25,11 @@ else
     echo "Peringatan: Virtual environment tidak ditemukan. Mencoba menjalankan dengan Python default."
 fi
 
-# Jalankan inferensi mode headless
-python src/main.py --source 0 --headless
+# Jalankan inferensi mode headless dengan deteksi platform otomatis
+if [ -f "/usr/bin/python3.6" ] && [ -f "/usr/lib/aarch64-linux-gnu/libgomp.so.1" ]; then
+    echo "Jetson Nano terdeteksi. Menjalankan main_jetson.py pada Python 3.6 dengan akselerasi GPU..."
+    LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 /usr/bin/python3.6 src/deployment/main_jetson.py --source 0 --headless --skip-frames 2
+else
+    echo "Bukan Jetson Nano. Menjalankan main.py dev fallback..."
+    python src/main.py --source 0 --headless
+fi

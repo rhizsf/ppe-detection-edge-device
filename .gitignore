@@ -20,8 +20,9 @@ assets/dataset/
 *.pt
 *.engine
 
-assets/audio/
-*.wav
+# Keep warning audio files tracked
+!assets/audio/
+!assets/audio/*.wav
 
 assets/dataset_person/
 *.pt
