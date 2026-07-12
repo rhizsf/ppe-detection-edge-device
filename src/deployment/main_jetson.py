@@ -285,6 +285,27 @@ logging.basicConfig(
 log = logging.getLogger("PROTMIND-JETSON")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DETEKSI KARTU SUARA USB (LINUX ALSA)
+# ─────────────────────────────────────────────────────────────────────────────
+def find_usb_audio_card():
+    """Mencari index kartu suara USB dari /proc/asound/cards."""
+    cards_file = Path("/proc/asound/cards")
+    if not cards_file.exists():
+        return None
+    try:
+        with open(cards_file, "r") as f:
+            lines = f.readlines()
+        for line in lines:
+            # Cari kata kunci USB Audio, USB, Audio, atau Essager
+            if any(k in line.lower() for k in ["usb", "audio", "essager"]):
+                parts = line.split()
+                if parts and parts[0].strip().isdigit():
+                    return int(parts[0].strip())
+    except Exception:
+        pass
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAINKAN AUDIO LINTAS PLATFORM
 # ─────────────────────────────────────────────────────────────────────────────
 def play_audio(wav_path: str) -> None:
@@ -305,8 +326,17 @@ def play_audio(wav_path: str) -> None:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
     elif system_name == "Linux":
+        card_idx = find_usb_audio_card()
+        if card_idx is not None:
+            # Menggunakan plughw agar format & sample rate disesuaikan otomatis oleh ALSA
+            cmd = ["aplay", "-D", f"plughw:{card_idx},0", str(wav_file.resolve())]
+            log.info(f"  [Audio] Menjalankan aplay ke USB Sound Card (hw:{card_idx})")
+        else:
+            cmd = ["aplay", str(wav_file.resolve())]
+            log.info(f"  [Audio] Menjalankan aplay default")
+
         try:
-            subprocess.Popen(["aplay", str(wav_file.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             try:
                 subprocess.Popen(["paplay", str(wav_file.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -474,7 +504,21 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Jalankan inferensi tanpa menampilkan window GUI (cv2.imshow).")
     parser.add_argument("--conf-person", type=float, default=None, help="Conf threshold untuk model Person.")
     parser.add_argument("--conf-ppe", type=float, default=None, help="Conf threshold untuk model PPE.")
+    parser.add_argument("--test-audio", action="store_true", help="Uji coba pemutaran audio pada kartu suara USB.")
     args = parser.parse_args()
+
+    # Uji coba audio cepat tanpa meload model/kamera
+    if args.test_audio:
+        log.info("=" * 60)
+        log.info("  PROTMIND APD SYSTEM — UJI COBA AUDIO SPEAKER")
+        log.info("=" * 60)
+        test_file = CONFIG["audio_helm"]
+        log.info(f"Mencoba memutar audio tes: {test_file}")
+        play_audio(test_file)
+        # Tunggu beberapa detik agar aplay (asinkron) selesai memutar suara sebelum program exit
+        time.sleep(5)
+        log.info("Uji coba audio selesai.")
+        sys.exit(0)
 
     # Terapkan argumen CLI ke CONFIG
     if args.conf_person is not None: CONFIG["conf_person"] = args.conf_person

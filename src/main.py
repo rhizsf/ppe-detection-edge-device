@@ -199,6 +199,24 @@ def get_combination_audio(violations):
     return None
 
 
+def find_usb_audio_card():
+    """Mencari index kartu suara USB dari /proc/asound/cards."""
+    cards_file = Path("/proc/asound/cards")
+    if not cards_file.exists():
+        return None
+    try:
+        with open(cards_file, "r") as f:
+            lines = f.readlines()
+        for line in lines:
+            if any(k in line.lower() for k in ["usb", "audio", "essager"]):
+                parts = line.split()
+                if parts and parts[0].strip().isdigit():
+                    return int(parts[0].strip())
+    except Exception:
+        pass
+    return None
+
+
 def play_audio(wav_path: str) -> None:
     """Memutar file audio secara asinkron tanpa menghentikan frame-rate video."""
     wav_file = Path(wav_path)
@@ -219,11 +237,18 @@ def play_audio(wav_path: str) -> None:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
     elif system_name == "Linux":
-        # Untuk Jetson Nano Linux, 'aplay' adalah pilihan tercepat dengan latensi paling rendah
+        card_idx = find_usb_audio_card()
+        if card_idx is not None:
+            # Menggunakan plughw agar format & sample rate disesuaikan otomatis oleh ALSA
+            cmd = ["aplay", "-D", f"plughw:{card_idx},0", str(wav_file.resolve())]
+            log.info(f"  [Audio] Menjalankan aplay ke USB Sound Card (hw:{card_idx})")
+        else:
+            cmd = ["aplay", str(wav_file.resolve())]
+            log.info(f"  [Audio] Menjalankan aplay default")
+
         try:
-            subprocess.Popen(["aplay", str(wav_file.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
-            # Fallback jika aplay tidak ada, coba paplay (PulseAudio)
             try:
                 subprocess.Popen(["paplay", str(wav_file.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
