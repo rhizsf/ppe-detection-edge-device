@@ -347,13 +347,13 @@ def telegram_worker():
             
         text_report, annotated_frame, t_detect = task
         
-        # Simpan gambar hasil deteksi pelanggaran ke folder terpisah secara lokal (diabaikan oleh Git)
         try:
-            Path("detections").mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            img_path = Path("detections") / f"violation_{timestamp}.jpg"
-            cv2.imwrite(str(img_path), annotated_frame)
-            log.info(f"  [Storage] Gambar pelanggaran berhasil disimpan ke: {img_path}")
+            save_dir = Path("detections")
+            save_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            save_path = save_dir / f"deteksi_{timestamp}_melanggar.jpg"
+            cv2.imwrite(str(save_path), annotated_frame)
+            log.info(f"  [Storage] Gambar pelanggaran berhasil disimpan ke: {save_path}")
         except Exception as e:
             log.error(f"  [Storage] Gagal menyimpan gambar pelanggaran: {e}")
             
@@ -714,18 +714,6 @@ def main():
                     annotated_frame, status_text, (px1, py1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, p_color, 2
                 )
-
-            # Simpan gambar hasil deteksi jika ada pekerja terdeteksi
-            if total_people > 0:
-                save_dir = Path("detections")
-                save_dir.mkdir(parents=True, exist_ok=True)
-                
-                has_any_violation = len(frame_violations) > 0
-                status_str = "melanggar" if has_any_violation else "lengkap"
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                
-                save_path = save_dir / f"deteksi_{timestamp}_{status_str}.jpg"
-                cv2.imwrite(str(save_path), annotated_frame)
 
             # Catat akhir waktu inferensi murni
             t_pure_inf = time.time() - t_model_start

@@ -525,6 +525,17 @@ def telegram_worker():
             
         text_report, annotated_frame, t_detect = task
         
+        # Simpan gambar secara lokal jika ada pelanggaran baru terdeteksi (kelas baru)
+        try:
+            save_dir = Path("detections")
+            save_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            save_path = save_dir / f"deteksi_{timestamp}_melanggar.jpg"
+            cv2.imwrite(str(save_path), annotated_frame)
+            log.info(f"  [Storage] Gambar pelanggaran berhasil disimpan ke: {save_path}")
+        except Exception as e:
+            log.error(f"  [Storage] Gagal menyimpan gambar pelanggaran: {e}")
+        
         # Kirim Laporan ke Telegram
         if CONFIG["telegram_token"] and CONFIG["telegram_chat_id"]:
             log.info("  [Telegram] Mengirim notifikasi alarm pelanggaran APD...")
@@ -834,18 +845,6 @@ def main():
                         annotated_frame, f"{cls_name} {cls_conf:.2f}", (cx1, cy1 - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1
                     )
-
-            # Simpan gambar hasil deteksi jika ada pekerja terdeteksi
-            if run_inference and len(person_boxes) > 0:
-                save_dir = Path("detections")
-                save_dir.mkdir(parents=True, exist_ok=True)
-                
-                has_any_violation = any(det["has_violation"] for det in cached_detections)
-                status_str = "melanggar" if has_any_violation else "lengkap"
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                
-                save_path = save_dir / f"deteksi_{timestamp}_{status_str}.jpg"
-                cv2.imwrite(str(save_path), annotated_frame)
 
             # Hitung FPS Frame menggunakan metode Window 30 frame (sangat akurat secara akademik)
             fps_window_counter += 1
