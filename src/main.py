@@ -327,10 +327,10 @@ def play_audio_blocking(wav_path: str) -> None:
             log.info(f"  [Audio] Menjalankan aplay default")
 
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             try:
-                subprocess.run(["paplay", str(wav_file.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["paplay", str(wav_file.resolve())], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 log.error(f"  [Audio] Gagal memutar audio di Linux: {e}")
 
