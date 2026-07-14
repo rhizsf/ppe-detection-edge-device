@@ -62,3 +62,6 @@ assets/dataset_cropped_by_label/
 
 # Local deployment guides (Not Pushed)
 jetson_deployment_info.md
+
+# Local detection results (Not Pushed)
+detections/

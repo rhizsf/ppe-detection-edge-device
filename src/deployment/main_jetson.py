@@ -780,6 +780,18 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1
                     )
 
+            # Simpan gambar hasil deteksi jika ada pekerja terdeteksi
+            if run_inference and len(person_boxes) > 0:
+                save_dir = Path("detections")
+                save_dir.mkdir(parents=True, exist_ok=True)
+                
+                has_any_violation = any(det["has_violation"] for det in cached_detections)
+                status_str = "melanggar" if has_any_violation else "lengkap"
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                
+                save_path = save_dir / f"deteksi_{timestamp}_{status_str}.jpg"
+                cv2.imwrite(str(save_path), annotated_frame)
+
             # Hitung FPS Frame menggunakan metode Window 30 frame (sangat akurat secara akademik)
             fps_window_counter += 1
             if fps_window_counter >= 30:
