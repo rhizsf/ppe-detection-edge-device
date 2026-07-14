@@ -597,6 +597,7 @@ audio_thread.start()
 # INFERENCE RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    global latest_audio_task
     import argparse
     parser = argparse.ArgumentParser(description="PROTMIND APD System — Inference Engine khusus Jetson Nano")
     parser.add_argument("--source", type=str, default=None, help="Sumber kamera (angka/path video).")

@@ -457,6 +457,7 @@ def list_available_cameras():
 # DETEKSI UTAMA (INFERENCE ENGINE)
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    global latest_audio_task
     import argparse
     parser = argparse.ArgumentParser(description="PROTMIND APD System — Inference Engine")
     parser.add_argument("--source", type=str, default=None, help="Sumber kamera/video (indeks angka atau path video file).")
