@@ -674,7 +674,9 @@ def main():
             no_vest_count = 0
             no_shoes_count = 0
             
+            t_pure_inf = 0.0
             if run_inference:
+                t_model_start = time.time()
                 # Bersihkan cache deteksi lama
                 cached_detections = []
                 
@@ -745,6 +747,7 @@ def main():
                         "distance": worker_distance,
                         "ppe_draw": ppe_draw_list
                     })
+                t_pure_inf = time.time() - t_model_start
                     
             # Terapkan Anotasi Visual dari Bounding Box Cache (Dukungan Frame Skip)
             for det in cached_detections:
@@ -773,24 +776,27 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1
                     )
 
-            t_inf_end = time.time()
-            t_inf = t_inf_end - t_inf_start
-            
             # Hitung FPS real-time
             current_time = time.time()
             t_frame_interval = current_time - prev_frame_time
             prev_frame_time = current_time
             
             fps_frame = 1.0 / t_frame_interval if t_frame_interval > 0 else 0.0
-            fps_inf = 1.0 / t_inf if t_inf > 0 else 0.0
             
             alpha = 0.1
             if frame_count == 1:
                 current_fps_frame = fps_frame
-                current_fps_inf = fps_inf
+                current_fps_inf = 0.0
             else:
                 current_fps_frame = alpha * fps_frame + (1.0 - alpha) * current_fps_frame
-                current_fps_inf = alpha * fps_inf + (1.0 - alpha) * current_fps_inf
+                
+            # Update FPS Inferensi HANYA jika inferensi murni berjalan pada frame ini
+            if run_inference and t_pure_inf > 0.0:
+                fps_inf = 1.0 / t_pure_inf
+                if current_fps_inf == 0.0:
+                    current_fps_inf = fps_inf
+                else:
+                    current_fps_inf = alpha * fps_inf + (1.0 - alpha) * current_fps_inf
                 
             # Ambil metrik resource sistem
             cpu_pct, gpu_pct, ram_pct = get_system_metrics()

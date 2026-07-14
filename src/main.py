@@ -533,6 +533,7 @@ def main():
             annotated_frame = frame.copy()
             H, W, _ = frame.shape
             
+            t_model_start = time.time()
             # Jalankan Deteksi Stage 1: Temukan Person (class 0 pada model COCO bawaan)
             results_p = model_p(frame, classes=0, conf=CONFIG["conf_person"], verbose=False)
             person_boxes = results_p[0].boxes.xyxy.cpu().numpy()
@@ -649,9 +650,8 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, p_color, 2
                 )
 
-            # Catat akhir waktu inferensi
-            t_inf_end = time.time()
-            t_inf = t_inf_end - t_inf_start
+            # Catat akhir waktu inferensi murni
+            t_pure_inf = time.time() - t_model_start
             
             # Hitung waktu interval antar-frame
             current_time = time.time()
@@ -660,16 +660,22 @@ def main():
             
             # Hitung FPS instan
             fps_frame = 1.0 / t_frame_interval if t_frame_interval > 0 else 0.0
-            fps_inf = 1.0 / t_inf if t_inf > 0 else 0.0
             
             # Haluskan nilai FPS menggunakan Exponential Moving Average (EMA)
             alpha = 0.1
             if frame_count == 1:
                 current_fps_frame = fps_frame
-                current_fps_inf = fps_inf
+                current_fps_inf = 0.0
             else:
                 current_fps_frame = alpha * fps_frame + (1.0 - alpha) * current_fps_frame
-                current_fps_inf = alpha * fps_inf + (1.0 - alpha) * current_fps_inf
+                
+            # Update FPS Inferensi jika waktu murni terhitung
+            if t_pure_inf > 0.0:
+                fps_inf = 1.0 / t_pure_inf
+                if current_fps_inf == 0.0:
+                    current_fps_inf = fps_inf
+                else:
+                    current_fps_inf = alpha * fps_inf + (1.0 - alpha) * current_fps_inf
                 
             # Ambil metrik resource sistem secara real-time
             cpu_pct, gpu_pct, ram_pct = get_system_metrics()
