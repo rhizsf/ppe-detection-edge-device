@@ -486,7 +486,7 @@ def warning_worker():
         if task is None:
             break
             
-        violations_to_play, text_report, annotated_frame = task
+        violations_to_play, text_report, annotated_frame, t_detect = task
         
         # 1. Kirim Laporan ke Telegram
         if CONFIG["telegram_token"] and CONFIG["telegram_chat_id"]:
@@ -495,14 +495,20 @@ def warning_worker():
             chat_id = CONFIG["telegram_chat_id"]
             url = f"https://api.telegram.org/bot{token}/sendPhoto"
             
+            # Hitung tundaan waktu pengiriman dari deteksi kamera ke bot Telegram
+            t_delay_send = time.time() - t_detect
+            text_report_with_delay = text_report + f"\n⏱️ <b>Delay Pengiriman:</b> {t_delay_send:.2f} detik"
+            
             success, img_encoded = cv2.imencode(".jpg", annotated_frame)
             if success:
                 files = {"photo": ("alarm.jpg", img_encoded.tobytes(), "image/jpeg")}
-                data = {"chat_id": chat_id, "caption": text_report, "parse_mode": "HTML"}
+                data = {"chat_id": chat_id, "caption": text_report_with_delay, "parse_mode": "HTML"}
                 try:
+                    t_post_start = time.time()
                     res = requests.post(url, data=data, files=files, timeout=10)
+                    t_post_duration = time.time() - t_post_start
                     if res.status_code == 200:
-                        log.info("  [Telegram] Berhasil mengirim laporan alarm!")
+                        log.info(f"  [Telegram] Berhasil mengirim laporan alarm! (API Delay: {t_post_duration:.2f}s)")
                     else:
                         log.error(f"  [Telegram] Gagal: {res.text}")
                 except Exception as e:
@@ -860,7 +866,7 @@ def main():
                         warning_text += f"• {no_shoes_count} Orang : Tanpa Sepatu Safety\n"
                         
                     warning_text += f"\nSegera lakukan inspeksi visual di lokasi konstruksi."
-                    warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy()))
+                    warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy(), time.time()))
 
 
 

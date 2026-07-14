@@ -309,7 +309,7 @@ def warning_worker():
         if task is None:
             break
         
-        violations_to_play, text_report, annotated_frame = task
+        violations_to_play, text_report, annotated_frame, t_detect = task
         
         # Simpan gambar hasil deteksi pelanggaran ke folder terpisah secara lokal (diabaikan oleh Git)
         try:
@@ -329,7 +329,7 @@ def warning_worker():
         # 1. Kirim Alarm Laporan ke Telegram
         if CONFIG["telegram_token"] and CONFIG["telegram_chat_id"]:
             log.info("  [Telegram] Mengirim notifikasi alarm pelanggaran APD...")
-            send_telegram_photo(text_report, annotated_frame)
+            send_telegram_photo(text_report, annotated_frame, t_detect)
         else:
             log.warning("  [Telegram] Kredensial tidak dikonfigurasi. Laporan Telegram dilewati.")
             print(f"\n{text_report}\n")
@@ -357,11 +357,15 @@ worker_thread.start()
 # ─────────────────────────────────────────────────────────────────────────────
 # TELEGRAM INTEGRATION
 # ─────────────────────────────────────────────────────────────────────────────
-def send_telegram_photo(caption: str, frame: np.ndarray) -> None:
+def send_telegram_photo(caption: str, frame: np.ndarray, t_detect: float) -> None:
     """Mengirim pesan alarm teks lengkap dengan gambar hasil deteksi (color-coded) ke Telegram."""
     token = CONFIG["telegram_token"]
     chat_id = CONFIG["telegram_chat_id"]
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    
+    # Hitung tundaan waktu pengiriman dari deteksi kamera ke bot Telegram
+    t_delay_send = time.time() - t_detect
+    caption_with_delay = caption + f"\n⏱️ <b>Delay Pengiriman:</b> {t_delay_send:.2f} detik"
     
     # Encode frame gambar langsung di memori untuk efisiensi
     success, img_encoded = cv2.imencode(".jpg", frame)
@@ -370,12 +374,14 @@ def send_telegram_photo(caption: str, frame: np.ndarray) -> None:
         return
         
     files = {"photo": ("alarm.jpg", img_encoded.tobytes(), "image/jpeg")}
-    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    data = {"chat_id": chat_id, "caption": caption_with_delay, "parse_mode": "HTML"}
     
     try:
+        t_post_start = time.time()
         response = requests.post(url, data=data, files=files, timeout=12)
+        t_post_duration = time.time() - t_post_start
         if response.status_code == 200:
-            log.info("  [Telegram] Berhasil mengirim laporan alarm!")
+            log.info(f"  [Telegram] Berhasil mengirim laporan alarm! (API Delay: {t_post_duration:.2f}s)")
         else:
             log.error(f"  [Telegram] Gagal mengirim: {response.text}")
     except Exception as e:
@@ -755,7 +761,7 @@ def main():
                 
                 # Masukkan ke queue agar diproses thread latar belakang (Telegram & Audio bergantian)
                 # Mengirimkan frame teranotasi sebagai visual bukti pelanggaran
-                warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy()))
+                warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy(), time.time()))
 
 
 
