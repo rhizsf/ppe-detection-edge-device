@@ -447,7 +447,9 @@ def get_system_metrics():
 # ─────────────────────────────────────────────────────────────────────────────
 # BACKGROUND ALARM WORKER
 # ─────────────────────────────────────────────────────────────────────────────
-warning_queue = queue.Queue()
+telegram_queue = queue.Queue()
+audio_lock = threading.Lock()
+latest_audio_task = None
 exit_event = threading.Event()
 
 def get_combination_audio(violations):
@@ -476,19 +478,54 @@ def get_combination_audio(violations):
     fallback_path = "assets/audio/peringatan_umum.wav"
     return fallback_path if Path(fallback_path).exists() else None
 
-def warning_worker():
+def play_audio_blocking(wav_path: str) -> None:
+    """Memutar file audio secara sinkron (blocking) pada thread audio worker."""
+    wav_file = Path(wav_path)
+    if not wav_file.exists():
+        log.warning(f"  [Audio] File suara tidak ditemukan: {wav_file.resolve()}")
+        return
+
+    system_name = platform.system()
+    if system_name == "Windows":
+        try:
+            import winsound
+            winsound.PlaySound(str(wav_file), winsound.SND_FILENAME)
+        except Exception:
+            subprocess.run(
+                ["powershell", "-c", f"(New-Object Media.SoundPlayer '{wav_file.resolve()}').PlaySync()"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+    elif system_name == "Linux":
+        card_idx = find_usb_audio_card()
+        if card_idx is not None:
+            cmd = ["aplay", "-D", f"plughw:{card_idx},0", str(wav_file.resolve())]
+            log.info(f"  [Audio] Menjalankan aplay ke USB Sound Card (hw:{card_idx})")
+        else:
+            cmd = ["aplay", str(wav_file.resolve())]
+            log.info(f"  [Audio] Menjalankan aplay default")
+
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            try:
+                subprocess.run(["paplay", str(wav_file.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                log.error(f"  [Audio] Gagal memutar audio di Linux: {e}")
+
+def telegram_worker():
+    """Worker background khusus untuk pengiriman pesan Telegram secara real-time (non-blocking untuk audio)."""
     while not exit_event.is_set():
         try:
-            task = warning_queue.get(timeout=0.5)
+            task = telegram_queue.get(timeout=0.5)
         except queue.Empty:
             continue
             
         if task is None:
             break
             
-        violations_to_play, text_report, annotated_frame, t_detect = task
+        text_report, annotated_frame, t_detect = task
         
-        # 1. Kirim Laporan ke Telegram
+        # Kirim Laporan ke Telegram
         if CONFIG["telegram_token"] and CONFIG["telegram_chat_id"]:
             log.info("  [Telegram] Mengirim notifikasi alarm pelanggaran APD...")
             token = CONFIG["telegram_token"]
@@ -516,22 +553,34 @@ def warning_worker():
         else:
             log.warning("  [Telegram] Kredensial Telegram dilewati (tidak diset).")
 
-        # 2. Putar Suara Warning Lintas Platform
+        telegram_queue.task_done()
+
+def audio_worker():
+    """Worker background untuk memutar audio peringatan. Selalu memperbarui ke pelanggaran terbaru saat audio selesai."""
+    global latest_audio_task
+    while not exit_event.is_set():
+        task = None
+        with audio_lock:
+            if latest_audio_task is not None:
+                task = latest_audio_task
+                latest_audio_task = None
+        
+        if task is None:
+            time.sleep(0.1)
+            continue
+            
+        violations_to_play = task
         audio_file = get_combination_audio(violations_to_play)
         if audio_file:
             log.info(f"  [Audio Warning] Memutar peringatan kombinasi: {Path(audio_file).name}...")
-            play_audio(audio_file)
-            delay = CONFIG["audio_delay"]
-            steps = int(delay * 10)
-            for _ in range(steps):
-                if exit_event.is_set():
-                    break
-                time.sleep(0.1)
-            
-        warning_queue.task_done()
+            play_audio_blocking(audio_file)
 
-worker_thread = threading.Thread(target=warning_worker, daemon=True)
-worker_thread.start()
+# Jalankan thread background baru
+telegram_thread = threading.Thread(target=telegram_worker, daemon=True)
+telegram_thread.start()
+
+audio_thread = threading.Thread(target=audio_worker, daemon=True)
+audio_thread.start()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INFERENCE RUNNER
@@ -866,7 +915,9 @@ def main():
                         warning_text += f"• {no_shoes_count} Orang : Tanpa Sepatu Safety\n"
                         
                     warning_text += f"\nSegera lakukan inspeksi visual di lokasi konstruksi."
-                    warning_queue.put((violations_to_alert, warning_text, annotated_frame.copy(), time.time()))
+                    telegram_queue.put((warning_text, annotated_frame.copy(), time.time()))
+                    with audio_lock:
+                        latest_audio_task = violations_to_alert
 
 
 
