@@ -517,6 +517,10 @@ def main():
     current_fps_frame = 0.0
     current_fps_inf = 0.0
     
+    # Untuk perhitungan FPS Frame metode Window (akurat akademik)
+    fps_window_counter = 0
+    t_window_start = time.time()
+    
     try:
         while cap.isOpened():
             ret, frame = cap.read()
@@ -653,23 +657,23 @@ def main():
             # Catat akhir waktu inferensi murni
             t_pure_inf = time.time() - t_model_start
             
-            # Hitung waktu interval antar-frame
-            current_time = time.time()
-            t_frame_interval = current_time - prev_frame_time
-            prev_frame_time = current_time
-            
-            # Hitung FPS instan
-            fps_frame = 1.0 / t_frame_interval if t_frame_interval > 0 else 0.0
-            
-            # Haluskan nilai FPS menggunakan Exponential Moving Average (EMA)
-            alpha = 0.1
-            if frame_count == 1:
-                current_fps_frame = fps_frame
+            # Hitung FPS Frame menggunakan metode Window 30 frame (sangat akurat secara akademik)
+            fps_window_counter += 1
+            if fps_window_counter >= 30:
+                t_window_end = time.time()
+                t_elapsed = t_window_end - t_window_start
+                current_fps_frame = 30.0 / t_elapsed if t_elapsed > 0 else 0.0
+                
+                # Reset window
+                fps_window_counter = 0
+                t_window_start = t_window_end
+            elif frame_count == 1:
+                t_frame_interval = time.time() - prev_frame_time
+                current_fps_frame = 1.0 / t_frame_interval if t_frame_interval > 0 else 0.0
                 current_fps_inf = 0.0
-            else:
-                current_fps_frame = alpha * fps_frame + (1.0 - alpha) * current_fps_frame
                 
             # Update FPS Inferensi jika waktu murni terhitung
+            alpha = 0.1
             if t_pure_inf > 0.0:
                 fps_inf = 1.0 / t_pure_inf
                 if current_fps_inf == 0.0:
